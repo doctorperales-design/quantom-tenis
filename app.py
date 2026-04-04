@@ -339,8 +339,19 @@ def main():
     st.title("🎾 Quantum Tennis Engine v4.0 (Math-Safe)")
     st.markdown("Ahora Python procesa *toda* la matemática de Log5, No-Vig y simulaciones Monte Carlo puras localmente.")
     
-    best_of = st.radio("Formato del Torneo:", [3, 5], index=0, format_func=lambda x: f"Mejor de {x} Sets", horizontal=True)
-    matches_text = st.text_area("📋 Pega tus partidos (con cuotas opcionales Ejemplo: Sinner -120 vs Alcaraz +100):", height=150)
+    if "input_matches" not in st.session_state:
+        st.session_state["input_matches"] = ""
+
+    def limpiar_texto():
+        st.session_state["input_matches"] = ""
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        best_of = st.radio("Formato del Torneo:", [3, 5], index=0, format_func=lambda x: f"Mejor de {x} Sets", horizontal=True)
+    with col2:
+        st.button("🗑️ Limpiar Partidos", on_click=limpiar_texto, use_container_width=True)
+        
+    matches_text = st.text_area("📋 Pega tus partidos (con cuotas opcionales Ejemplo: Sinner -120 vs Alcaraz +100):", key="input_matches", height=150)
     
     if st.button("🚀 Analizar Encuentros", use_container_width=True):
         if not matches_text.strip():
