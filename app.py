@@ -250,12 +250,19 @@ Responde ÚNICA Y ESTRICTAMENTE con un solo objeto JSON crudo en este formato (n
         raw = response.text.replace('```json', '').replace('```', '').strip()
         data = json.loads(raw)
         
+        spw = float(data.get("spw_pct", 50.0))
+        rpw = float(data.get("rpw_pct", 50.0))
+        
+        # Filtro Anti-Cortocircuito (Si Gemini escupe Zeros, lo forzamos a métricas estándar de ITF)
+        if spw <= 10.0: spw = 55.0 
+        if rpw <= 10.0: rpw = 40.0
+        
         return {
             "matches": "Web Scraping",
             "hold_pct": 0.0,
             "break_pct": 0.0,
-            "spw_pct": float(data.get("spw_pct", 50.0)),
-            "rpw_pct": float(data.get("rpw_pct", 50.0))
+            "spw_pct": spw,
+            "rpw_pct": rpw
         }
     except Exception as e:
         st.error(f"Falla en el Rescate de Gemini para {player_name}: {e}")
@@ -352,6 +359,16 @@ def main():
             # Fallbacks obligatorios
             if not p1_name: p1_name = "Desconocido 1"
             if not p2_name: p2_name = "Desconocido 2"
+            
+            # --- FILTROS DE SEGURIDAD (Excluir Ruido) ---
+            if "utr" in p1_name.lower() or "utr" in p2_name.lower():
+                st.warning(f"🚫 Saltando partido UTR Pro ({p1_name} vs {p2_name}) por falta de rigor ATP/WTA.")
+                continue
+                
+            if odd1 and odd2:
+                if (odd1 <= -500) or (odd2 <= -500):
+                    st.warning(f"🚫 Saltando {p1_name} vs {p2_name} por estar fuertemente decidido (Cuota de {min(odd1, odd2)} <= -500).")
+                    continue
 
             with st.expander(f"Análisis: {p1_name} vs {p2_name}", expanded=True):
                 st.markdown("### 🧮 Motor Matemático (Python Local)")
