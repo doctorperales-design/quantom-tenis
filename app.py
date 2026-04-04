@@ -203,6 +203,10 @@ def calculate_stats(player_name, file_path="matches_jsonl.jsonl"):
     spw_pct = (svc_pts_won / svc_pts_total * 100) if svc_pts_total else 0
     rpw_pct = (ret_pts_won / ret_pts_total * 100) if ret_pts_total else 0
     
+    # Filtro Anti-Ceros (Si Sackmann tiene un Walkover o partido sin Stats registradas)
+    if spw_pct <= 10.0: spw_pct = 55.0
+    if rpw_pct <= 10.0: rpw_pct = 40.0
+    
     return {
         "matches": matches_found, "hold_pct": round(hold_pct, 1),
         "break_pct": round(break_pct, 1), "spw_pct": round(spw_pct, 1),
