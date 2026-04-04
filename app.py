@@ -375,25 +375,46 @@ def main():
                     mc_win_p1 = simulate_match(pA_serve, pB_serve, best_of=best_of)
                     mc_win_p2 = 1.0 - mc_win_p1
                     
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric(f"Prob. Saque {p1_name}", f"{pA_serve * 100:.1f}%")
-                    c1.metric(f"Monte Carlo Win% {p1_name}", f"{mc_win_p1 * 100:.1f}%")
+                    c1, c2 = st.columns(2)
                     
-                    c2.metric(f"Prob. Saque {p2_name}", f"{pB_serve * 100:.1f}%")
-                    c2.metric(f"Monte Carlo Win% {p2_name}", f"{mc_win_p2 * 100:.1f}%")
-                    
-                    ev_info = []
                     if odd1 and odd2:
                         nv_prob1, nv_prob2, f_odd1, f_odd2 = no_vig_probs(odd1, odd2)
                         ev1 = calculate_ev(mc_win_p1, american_to_decimal(odd1))
                         ev2 = calculate_ev(mc_win_p2, american_to_decimal(odd2))
                         
-                        c3.markdown(f"**No-Vig Probs:**\n- P1: {nv_prob1*100:.1f}%\n- P2: {nv_prob2*100:.1f}%")
-                        c3.markdown(f"**Fair Odds:**\n- P1: {f_odd1:.2f}\n- P2: {f_odd2:.2f}")
-                        c3.markdown(f"**EV P1:** {ev1:+.2f}%\n\n**EV P2:** {ev2:+.2f}%")
-                        ev_info = f"EV P1: {ev1:+.2f}%, EV P2: {ev2:+.2f}% (Bookie Odds: {odd1} / {odd2})"
+                        # ----- Columna 1: Jugador 1 -----
+                        c1.markdown(f"#### 🎾 {p1_name}")
+                        c1.metric("1. Prob. de ganar su Saque", f"{pA_serve * 100:.1f}%")
+                        
+                        p1_modelo = mc_win_p1 * 100
+                        p1_casa = nv_prob1 * 100
+                        edge1 = p1_modelo - p1_casa
+                        c1.metric("2. Prob. Modelo (Monte Carlo)", f"{p1_modelo:.1f}%", f"{edge1:+.1f}% Edge vs Casa🏆")
+                        c1.metric("3. Prob. Casa (Bookie No-Vig)", f"{p1_casa:.1f}%", f"Fair Odds: {f_odd1:.2f}", delta_color="off")
+                        c1.metric("💰 Expected Value (ROI)", f"{(ev1 * 100):+.1f}%")
+
+                        # ----- Columna 2: Jugador 2 -----
+                        c2.markdown(f"#### 🎾 {p2_name}")
+                        c2.metric("1. Prob. de ganar su Saque", f"{pB_serve * 100:.1f}%")
+                        
+                        p2_modelo = mc_win_p2 * 100
+                        p2_casa = nv_prob2 * 100
+                        edge2 = p2_modelo - p2_casa
+                        c2.metric("2. Prob. Modelo (Monte Carlo)", f"{p2_modelo:.1f}%", f"{edge2:+.1f}% Edge vs Casa🏆")
+                        c2.metric("3. Prob. Casa (Bookie No-Vig)", f"{p2_casa:.1f}%", f"Fair Odds: {f_odd2:.2f}", delta_color="off")
+                        c2.metric("💰 Expected Value (ROI)", f"{(ev2 * 100):+.1f}%")
+                        
+                        ev_info = f"EV P1: {(ev1 * 100):+.2f}%, EV P2: {(ev2 * 100):+.2f}% (Bookie Odds: {odd1} / {odd2})"
                     else:
-                        c3.warning("No se detectaron cuotas válidas (-120, +250) para calcular VIG y EV.")
+                        c1.markdown(f"#### 🎾 {p1_name}")
+                        c1.metric("Prob. Saque", f"{pA_serve * 100:.1f}%")
+                        c1.metric("Prob. Modelo", f"{mc_win_p1 * 100:.1f}%")
+                        
+                        c2.markdown(f"#### 🎾 {p2_name}")
+                        c2.metric("Prob. Saque", f"{pB_serve * 100:.1f}%")
+                        c2.metric("Prob. Modelo", f"{mc_win_p2 * 100:.1f}%")
+                        
+                        st.warning("No se detectaron cuotas válidas (-120, +250) para cruzar contra la Casa.")
                         ev_info = "Sin cuotas ingresadas"
 
                     local_report = f"""
