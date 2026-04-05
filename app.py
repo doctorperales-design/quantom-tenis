@@ -153,6 +153,33 @@ def no_vig(odd1: int, odd2: int) -> tuple:
 def ev(prob: float, dec_odd: float) -> float:
     return prob * (dec_odd - 1) - (1 - prob)
 
+def get_tier(p_mod: float, ev_val: float | None, p_casa: float | None) -> str:
+    p_pct = p_mod * 100.0
+    
+    if p_casa is None or ev_val is None:
+        if p_pct >= 65.0: return "🟢 DERECHA (Sin Cuota)"
+        elif p_pct >= 50.0: return "🟡 VALOR (Sin Cuota)"
+        else: return "🔴 BASURA (Sin Cuota)"
+
+    ev_pct = ev_val * 100.0
+    pc_pct = p_casa * 100.0
+    
+    if p_pct < pc_pct and ev_pct <= 0:
+        return "🔴 BASURA (A favor de la Casa)"
+    if p_pct < 45.0:
+        return "🔴 BASURA (Underdog Tóxico)"
+        
+    if p_pct >= 70.0 and ev_pct >= 2.0 and p_pct > pc_pct:
+        return "🔥 SÚPER DERECHA"
+    if 60.0 <= p_pct < 70.0 and ev_pct >= 3.0 and p_pct > pc_pct:
+        return "🟢 DERECHA"
+    if 50.0 <= p_pct < 60.0 and pc_pct < 45.0:
+        return "🎯 FRANCOTIRADOR"
+    if 45.0 <= p_pct < 60.0 and ev_pct >= 8.0 and p_pct > pc_pct:
+        return "🟡 VALOR / PARLAY"
+        
+    return "🔴 BASURA (No cumple umbrales EV/Varianza)"
+
 def log5_serve(spw: float, rpw: float) -> float:
     A, B = spw / 100.0, rpw / 100.0
     d = A * (1 - B) + (1 - A) * B
@@ -321,33 +348,6 @@ Manda ÚNICAMENTE un JSON crudo (sin backticks) con:
         return {"n": 1, "hold": 0.0, "brk": 0.0, "spw": 55.0, "rpw": 40.0, "source": "Gemini (Error Genérico)"}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GEMINI — ANÁLISIS H48 UNIFICADO
-# ─────────────────────────────────────────────────────────────────────────────
-def gemini_full_analysis(p1: str, p2: str, report: str, alt_m: int) -> str:
-    client = get_gemini_client()
-    if not client: return "❌ GOOGLE_API_KEY no configurada."
-    try:
-        prompt = f"""ERES UN MODELO EXCLUSIVO DE GOOGLE SEARCH.
-
-CONTEXTO: Juegan {p1} vs {p2} (Altitud: {alt_m} metros).
-MATEMÁTICA INTERNA YA PROCESADA:
-{report}
-
-PASO 1 BÚSQUEDA WEB: Busca hechos objetivos de las últimas 48h (Fatiga por maratones 3sets, Medical TimeOuts recientes, declaraciones).
-PASO 2 VEREDICTO DE APUESTAS (ESTRICTO): 
-- Si Expected Value es mayor a 5% Y no hay ninguna lesión grave: ✅ VERDE APOSTAR.
-- Si Expected Value es marginal (0 a 5%) O hay mucha fatiga: ⚠️ AMARILLO PRECAUCIÓN.
-- Si EV es negativo: 🚫 ROJO EVITAR.
-
-Responde únicamente con "Contexto Encontrado" (viñetas cortas) y tu "Veredicto Binario"."""
-        r = client.models.generate_content(
-            model=GEMINI_MODEL, contents=prompt,
-            config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.2)
-        )
-        return r.text
-    except Exception as e: return f"Error Gemini: {e}"
-
-# ─────────────────────────────────────────────────────────────────────────────
 # UI
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
@@ -439,21 +439,15 @@ def main():
                 fair    = f1  if col is m1 else f2
                 ev_val  = ev(mc_w, american_to_decimal(odd))
                 edge    = (mc_w - nv_this) * 100
+                tier    = get_tier(mc_w, ev_val, nv_this)
                 col.metric("P(Casa) No-Vig", f"{nv_this*100:.1f}%", f"Fair: {fair}", delta_color="off")
                 col.metric("💰 EV Return", f"{ev_val*100:+.1f}%", delta_color="normal" if ev_val > 0 else "inverse")
-                ev_lines.append(f"{name}: EV={ev_val*100:+.2f}%")
-
-        report = f"""
-{p1} Corregido: SPW={adj_spw1:.1f}% RPW={adj_rpw1:.1f}% | P(Srv)={pA_base:.3f}
-{p2} Corregido: SPW={adj_spw2:.1f}% RPW={adj_rpw2:.1f}% | P(Srv)={pB_base:.3f}
-Gaussiana Fin: {mc_A*100:.1f}% vs {mc_B*100:.1f}%. Altitud={altitude_m}m.
-{chr(10).join(ev_lines) if ev_lines else 'Sin cuotas.'}
-"""
-
-        st.markdown("#### 🤖 Gemini 2.5 Pro — Juez de Entorno H48")
-        with st.spinner("Conectando Search Grounding con Evaluador Final…"):
-            analisis = gemini_full_analysis(p1, p2, report, altitude_m)
-            st.info(analisis)
+                col.markdown(f"### {tier}")
+                ev_lines.append(f"{name}: EV={ev_val*100:+.2f}% | Tier: {tier}")
+            else:
+                tier = get_tier(mc_w, None, None)
+                col.markdown(f"### {tier}")
+                ev_lines.append(f"{name}: S/C | Tier: {tier}")
 
 if __name__ == "__main__":
     main()
