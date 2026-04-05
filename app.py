@@ -24,7 +24,10 @@ MC_ITERATIONS = 10000
 METADATA_KW = {
     'local', 'visita', 'empate', 'sencillos', 'dobles', 'vivo', 'apuestas',
     'streaming', 'women', 'men', 'tour', 'challenger', 'atp', 'wta', 'itf',
-    'world tennis', 'grand slam', 'futures', 'copa', 'qualifier', 'qualy'
+    'world tennis', 'grand slam', 'futures', 'copa', 'qualifier', 'qualy',
+    'hoy', 'mañana', 'lunes', 'martes', 'miércoles', 'miercoles', 'jueves', 
+    'viernes', 'sábado', 'sabado', 'domingo', 'ene', 'feb', 'mar', 'abr', 
+    'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic', 'vs'
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -66,7 +69,7 @@ def parse_matches(text: str) -> list[tuple]:
         if results:
             return results
 
-    TIME_RE    = re.compile(r'^\d{2}:\d{2}$')
+    DATE_TIME_RE = re.compile(r'^(\d{1,2}\s+[a-zA-Z]{3}\s+)?\d{2}:\d{2}$')
     COUNTER_RE = re.compile(r'^\+\s*\d{1,2}\s*(Streaming)?$', re.I)
     ODD_LONE   = re.compile(r'^[+-]\d{3,4}$')
 
@@ -76,9 +79,11 @@ def parse_matches(text: str) -> list[tuple]:
         line = raw.strip()
         if not line:
             continue
-        if any(kw in line.lower() for kw in METADATA_KW):
+        
+        # Búsqueda de palabra exacta para no ignorar nombres verdaderos (ej. "Mendez" contiene "men")
+        if any(re.search(rf'\b{re.escape(kw)}\b', line.lower()) for kw in METADATA_KW):
             continue
-        if TIME_RE.match(line) or COUNTER_RE.match(line):
+        if DATE_TIME_RE.match(line) or COUNTER_RE.match(line):
             continue
 
         odds_in = re.findall(r'[+-]\d{3,4}', line)
@@ -298,14 +303,22 @@ Manda ÚNICAMENTE un JSON crudo (sin backticks) con:
             config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.1)
         )
         raw  = r.text.replace("```json", "").replace("```", "").strip()
+        
+        # Extracción segura del JSON si Gemini decide agregar texto extra o alucinar
+        start = raw.find('{')
+        end = raw.rfind('}')
+        if start != -1 and end != -1:
+            raw = raw[start:end+1]
+            
         data = json.loads(raw)
         spw  = max(10.1, float(data.get("spw_pct", 55.0)))
         rpw  = max(10.1, float(data.get("rpw_pct", 40.0)))
         return {"n": 5, "hold": 0.0, "brk": 0.0,
-                "spw": spw, "rpw": rpw, "source": "Gemini Web"} # N=5 dispara Encogimiento Bayesiano severo
-    except Exception as e:
-        st.error(f"Gemini fallback falló para {name}: {e}")
-        return None
+                "spw": spw, "rpw": rpw, "source": "Gemini Web"} 
+    except Exception:
+        # Blindaje anti-crashes. Si Gemini falla (ej. sin resultados o desconectado),
+        # inyectamos el perfil 'fantasma' asumiendo N=1 para que el Shrinkage Bayesiano lo castigue al promedio ATP.
+        return {"n": 1, "hold": 0.0, "brk": 0.0, "spw": 55.0, "rpw": 40.0, "source": "Gemini (Error Genérico)"}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GEMINI — ANÁLISIS H48 UNIFICADO
