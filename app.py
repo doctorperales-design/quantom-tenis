@@ -1,6 +1,6 @@
 """
-Quantum Tennis Engine v5.0 — Gemini Edition
-Solo Gemini + Motor matemático local (Log5 + Monte Carlo corregido)
+Quantum Tennis Engine v6.0 — Gemini Quant Edition
+Solo Gemini + Motor Matemático Analítico (Cadenas de Markov O(1) + Encogimiento Bayesiano + Física)
 """
 
 import streamlit as st
@@ -19,7 +19,7 @@ load_dotenv()
 # ─────────────────────────────────────────────────────────────────────────────
 GEMINI_MODEL  = "gemini-2.5-pro"
 DB_PATH       = "matches_jsonl.jsonl"
-MC_ITERATIONS = 3000
+MC_ITERATIONS = 10000
 
 METADATA_KW = {
     'local', 'visita', 'empate', 'sencillos', 'dobles', 'vivo', 'apuestas',
@@ -37,10 +37,8 @@ def get_gemini_client():
         return None
     return genai.Client(api_key=api_key)
 
-
 def gemini_available() -> bool:
     return get_gemini_client() is not None
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PARSER DE LÍNEAS DE SPORTSBOOK
@@ -51,18 +49,9 @@ def extract_american_odds(text: str):
         return text.replace(m.group(1), '').strip(), int(m.group(1))
     return text.strip(), None
 
-
 def parse_matches(text: str) -> list[tuple]:
-    """
-    Parser unificado para:
-      • Formato 'vs' en línea: Sinner -120 vs Alcaraz +100
-      • Formato apilado Caliente/DraftKings móvil
-    """
-    # Normalizar guiones tipográficos iOS/Mac
     text = text.replace('–', '-').replace('—', '-').replace('−', '-')
     results = []
-
-    # ── Modo A: línea con 'vs' ────────────────────────────────────────────────
     if re.search(r'(?i)\bvs\.?\b', text):
         for line in text.splitlines():
             line = line.strip()
@@ -77,7 +66,6 @@ def parse_matches(text: str) -> list[tuple]:
         if results:
             return results
 
-    # ── Modo B: apilado (máquina de estados) ─────────────────────────────────
     TIME_RE    = re.compile(r'^\d{2}:\d{2}$')
     COUNTER_RE = re.compile(r'^\+\s*\d{1,2}\s*(Streaming)?$', re.I)
     ODD_LONE   = re.compile(r'^[+-]\d{3,4}$')
@@ -112,13 +100,43 @@ def parse_matches(text: str) -> list[tuple]:
 
     return results
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FÍSICA Y ENTORNO
+# ─────────────────────────────────────────────────────────────────────────────
+def apply_realism_and_environment(spw, rpw, matches_found, altitude_m, fatigue_idx):
+    """
+    1. Shrinkage Bayesiano para enfriar sesgo de optimismo (menos datos = más regresión al promedio)
+    2. Modificadores físicos elementales.
+    """
+    ATP_WTA_AVG_SPW = 62.0 
+    ATP_WTA_AVG_RPW = 38.0
+    
+    # Regresión Bayesiana (Afinando sin ahogar torneos ITF o Challengers):
+    # La máxima confianza se logra desde los 15 partidos (justo para no castigar circuitos menores).
+    # El 'castigo' MÁXIMO contra jugadores fantasma será del 35%, protegiendo SIEMPRE
+    # al menos el 65% de la identidad del jugador para permitir ROI alto (70%-80%).
+    confidence = min(matches_found / 15.0, 1.0) if matches_found > 0 else 0.0
+    shrink_factor = 0.35 * (1.0 - confidence)
+    
+    adj_spw = (spw * (1 - shrink_factor)) + (ATP_WTA_AVG_SPW * shrink_factor)
+    adj_rpw = (rpw * (1 - shrink_factor)) + (ATP_WTA_AVG_RPW * shrink_factor)
+    
+    # Altitud: Favorece fuertemente al saque.
+    alt_bonus = (altitude_m / 1000.0) * 1.5
+    adj_spw += alt_bonus
+    adj_rpw -= alt_bonus * 0.5 
+    
+    # Fatiga (Escala 0-5)
+    adj_spw -= fatigue_idx * 0.5
+    adj_rpw -= fatigue_idx * 1.5
+    
+    return min(max(adj_spw, 30.0), 90.0), min(max(adj_rpw, 10.0), 70.0)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MATEMÁTICA LOCAL
+# MATEMÁTICA ANALÍTICA Y MARKOV CHAINS
 # ─────────────────────────────────────────────────────────────────────────────
 def american_to_decimal(odd: int) -> float:
     return (odd / 100 + 1) if odd > 0 else (100 / abs(odd) + 1)
-
 
 def no_vig(odd1: int, odd2: int) -> tuple:
     i1 = 1 / american_to_decimal(odd1)
@@ -127,81 +145,83 @@ def no_vig(odd1: int, odd2: int) -> tuple:
     p1, p2 = i1 / t, i2 / t
     return p1, p2, round(1 / p1, 3), round(1 / p2, 3)
 
-
 def ev(prob: float, dec_odd: float) -> float:
     return prob * (dec_odd - 1) - (1 - prob)
 
-
 def log5_serve(spw: float, rpw: float) -> float:
-    A, B = spw / 100, rpw / 100
+    A, B = spw / 100.0, rpw / 100.0
     d = A * (1 - B) + (1 - A) * B
     return (A * (1 - B)) / d if d else 0.5
 
+def calc_game_win_prob(p: float) -> float:
+    """ Solución Analítica O(1) vía Cadenas de Markov para ganar 1 Game. """
+    q = 1.0 - p
+    p_win_in_4 = p**4
+    p_win_in_5 = 4 * (p**4) * q
+    p_win_in_6 = 10 * (p**4) * (q**2)
+    p_reach_deuce = 20 * (p**3) * (q**3)
+    p_win_from_deuce = (p**2) / (p**2 + q**2) if (p**2 + q**2) > 0 else 0
+    return p_win_in_4 + p_win_in_5 + p_win_in_6 + (p_reach_deuce * p_win_from_deuce)
 
-def sim_game(p: float) -> int:
-    s = r = 0
+def simulate_tiebreak_fast(pA: float, pB: float) -> int:
+    ptsA, ptsB = 0, 0
+    turn = 0
     while True:
-        if random.random() < p: s += 1
-        else: r += 1
-        if s >= 4 and s - r >= 2: return 1
-        if r >= 4 and r - s >= 2: return 0
-
-
-def sim_tiebreak(p_first: float, p_second: float) -> int:
-    a = b = total = 0
-    while True:
-        if total == 0:
-            win = random.random() < p_first
+        if turn % 4 in [0, 3]:
+            if random.random() < pA: ptsA += 1
+            else: ptsB += 1
         else:
-            block = (total - 1) // 2
-            win = random.random() < (p_second if block % 2 == 0 else p_first)
-        if win: a += 1
-        else:   b += 1
-        total += 1
-        if a >= 7 and a - b >= 2: return 1
-        if b >= 7 and b - a >= 2: return 0
+            if random.random() < pB: ptsB += 1
+            else: ptsA += 1
+        if ptsA >= 7 and ptsA - ptsB >= 2: return 1
+        if ptsB >= 7 and ptsB - ptsA >= 2: return 0
+        turn += 1
 
-
-def sim_set(pA: float, pB: float, a_first: bool = True) -> tuple[int, bool]:
-    gA = gB = 0
-    a_serves = a_first
+def simulate_set_markov(pGameA, pGameB, pPointA, pPointB):
+    gamesA, gamesB = 0, 0
+    serve_turn = 0 # 0=A saca, 1=B saca
     while True:
-        if gA == 6 and gB == 6:
-            tf = pA if a_serves else pB
-            ts = pB if a_serves else pA
-            w  = sim_tiebreak(tf, ts)
-            if w: gA += 1
-            else: gB += 1
-            return (1 if gA > gB else 0), not a_serves
-
-        if a_serves:
-            if sim_game(pA): gA += 1
-            else: gB += 1
+        if gamesA == 6 and gamesB == 6:
+            return simulate_tiebreak_fast(pPointA, pPointB)
+        
+        if serve_turn == 0:
+            if random.random() < pGameA: gamesA += 1
+            else: gamesB += 1
+            serve_turn = 1
         else:
-            if sim_game(pB): gB += 1
-            else: gA += 1
-        a_serves = not a_serves
+            if random.random() < pGameB: gamesB += 1
+            else: gamesA += 1
+            serve_turn = 0
+            
+        if gamesA >= 6 and gamesA - gamesB >= 2: return 1
+        if gamesB >= 6 and gamesB - gamesA >= 2: return 0
+        if gamesA == 7: return 1
+        if gamesB == 7: return 0
 
-        if gA >= 6 and gA - gB >= 2: return 1, a_serves
-        if gB >= 6 and gB - gA >= 2: return 0, a_serves
-        if gA == 7: return 1, a_serves
-        if gB == 7: return 0, a_serves
-
-
-def sim_match(pA: float, pB: float, best_of: int = 3, n: int = MC_ITERATIONS) -> float:
-    needed = 2 if best_of == 3 else 3
-    wins = 0
-    for _ in range(n):
-        sA = sB = 0
-        a_srv = True
-        while sA < needed and sB < needed:
-            w, a_srv = sim_set(pA, pB, a_srv)
-            if w: sA += 1
-            else: sB += 1
-        if sA == needed:
-            wins += 1
-    return wins / n
-
+def simulate_match_quantum(p_serve_A_base, p_serve_B_base, best_of=3, iterations=MC_ITERATIONS, altitude_m=0):
+    sets_to_win = 2 if best_of == 3 else 3
+    A_wins = 0
+    
+    # Mayor altitud = Mayor varianza estocástica
+    variance_mult = 1.0 + (altitude_m / 2000.0)
+    base_std_dev = 0.015 * variance_mult
+    
+    for _ in range(iterations):
+        # Gaussiana Diaria (Mitiga "Optimismo Robotico")
+        pA_diario = max(0.35, min(0.95, random.gauss(p_serve_A_base, base_std_dev)))
+        pB_diario = max(0.35, min(0.95, random.gauss(p_serve_B_base, base_std_dev)))
+        
+        pGameA = calc_game_win_prob(pA_diario)
+        pGameB = calc_game_win_prob(pB_diario)
+        
+        setsA, setsB = 0, 0
+        while setsA < sets_to_win and setsB < sets_to_win:
+            if simulate_set_markov(pGameA, pGameB, pA_diario, pB_diario): setsA += 1
+            else: setsB += 1
+            
+        if setsA == sets_to_win: A_wins += 1
+        
+    return A_wins / iterations
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BASE DE DATOS LOCAL
@@ -222,8 +242,7 @@ def get_stats(name: str, path: str = DB_PATH) -> dict | None:
 
                 as_w = name.lower() in wn.lower()
                 as_l = name.lower() in ln.lower()
-                if not as_w and not as_l:
-                    continue
+                if not as_w and not as_l: continue
 
                 if as_w:
                     wp = (m[6], m[8], m[9], m[10], m[11], m[12])
@@ -242,14 +261,12 @@ def get_stats(name: str, path: str = DB_PATH) -> dict | None:
                 rt_brk  += max(0, lp[5] - lp[4])
                 n += 1
 
-    except FileNotFoundError:
-        return None
+    except FileNotFoundError: return None
     except Exception as e:
         st.error(f"BD error: {e}")
         return None
 
-    if n == 0:
-        return None
+    if n == 0: return None
 
     spw = sv_won / sv_pts * 100 if sv_pts else 55.0
     rpw = rt_won / rt_pts * 100 if rt_pts else 40.0
@@ -265,215 +282,143 @@ def get_stats(name: str, path: str = DB_PATH) -> dict | None:
         "source":  "BD Local",
     }
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # GEMINI — STATS FALLBACK
 # ─────────────────────────────────────────────────────────────────────────────
 def gemini_stats(name: str) -> dict | None:
     client = get_gemini_client()
-    if not client:
-        return None
+    if not client: return None
     try:
-        prompt = f"""Busca en TennisAbstract, FlashScore, CoreTennis, ATP o ITF las estadísticas \
-recientes de este tenista: "{name}"
-
-Necesito EXCLUSIVAMENTE:
-- Service Points Won % (puntos ganados sacando)
-- Return Points Won % (puntos ganados restando)
-
-Si no hay dato exacto, infiere un valor realista según su nivel y superficie habitual. \
-Nunca devuelvas cero.
-
-Responde SOLO con JSON crudo (sin backticks, sin texto extra):
-{{"spw_pct": 64.5, "rpw_pct": 38.2}}"""
+        prompt = f"""Busca estadísticas de tenis recientes (últimos 12 meses) de este jugador: "{name}"
+Manda ÚNICAMENTE un JSON crudo (sin backticks) con:
+{{"spw_pct": 65.5, "rpw_pct": 39.2}}"""
 
         r = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[{"google_search": {}}],
-                temperature=0.1,
-            )
+            model=GEMINI_MODEL, contents=prompt,
+            config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.1)
         )
         raw  = r.text.replace("```json", "").replace("```", "").strip()
         data = json.loads(raw)
         spw  = max(10.1, float(data.get("spw_pct", 55.0)))
         rpw  = max(10.1, float(data.get("rpw_pct", 40.0)))
-        return {"n": "Web", "hold": 0.0, "brk": 0.0,
-                "spw": spw, "rpw": rpw, "source": "Gemini Search"}
+        return {"n": 5, "hold": 0.0, "brk": 0.0,
+                "spw": spw, "rpw": rpw, "source": "Gemini Web"} # N=5 dispara Encogimiento Bayesiano severo
     except Exception as e:
-        st.error(f"Gemini stats fallback falló para {name}: {e}")
+        st.error(f"Gemini fallback falló para {name}: {e}")
         return None
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# GEMINI — ANÁLISIS COMPLETO (contexto + veredicto)
+# GEMINI — ANÁLISIS H48 UNIFICADO
 # ─────────────────────────────────────────────────────────────────────────────
-def gemini_full_analysis(p1: str, p2: str, report: str) -> str:
+def gemini_full_analysis(p1: str, p2: str, report: str, alt_m: int) -> str:
     client = get_gemini_client()
-    if not client:
-        return "❌ GOOGLE_API_KEY no configurada."
+    if not client: return "❌ GOOGLE_API_KEY no configurada."
     try:
-        prompt = f"""Eres un analista de apuestas de tenis con acceso a búsqueda en tiempo real.
+        prompt = f"""ERES UN MODELO EXCLUSIVO DE GOOGLE SEARCH.
 
-PASO 1 — CONTEXTO H48 (búsqueda web obligatoria):
-Busca hechos objetivos de las últimas 48 horas sobre {p1} y {p2}:
-• Partidos disputados recientemente (duración, esfuerzo físico)
-• Lesiones, retiros o problemas físicos reportados
-• Viajes largos o cambios de superficie recientes
-
-PASO 2 — AUDITORÍA MATEMÁTICA:
-Analiza este reporte generado localmente (Log5 + Monte Carlo {MC_ITERATIONS} iter.):
+CONTEXTO: Juegan {p1} vs {p2} (Altitud: {alt_m} metros).
+MATEMÁTICA INTERNA YA PROCESADA:
 {report}
 
-PASO 3 — VEREDICTO FINAL (reglas estrictas):
-• EV > 5% Y sin lesiones/fatiga grave → ✅ VERDE — Apostar
-• 0% < EV ≤ 5% O fatiga menor detectada → ⚠️ AMARILLO — Reducir stake
-• EV negativo O lesión confirmada → 🚫 ROJO — Evitar
+PASO 1 BÚSQUEDA WEB: Busca hechos objetivos de las últimas 48h (Fatiga por maratones 3sets, Medical TimeOuts recientes, declaraciones).
+PASO 2 VEREDICTO DE APUESTAS (ESTRICTO): 
+- Si Expected Value es mayor a 5% Y no hay ninguna lesión grave: ✅ VERDE APOSTAR.
+- Si Expected Value es marginal (0 a 5%) O hay mucha fatiga: ⚠️ AMARILLO PRECAUCIÓN.
+- Si EV es negativo: 🚫 ROJO EVITAR.
 
-Formato de respuesta:
-**CONTEXTO H48**
-[viñetas con hechos encontrados o "Sin alertas detectadas"]
-
-**AUDITORÍA MATEMÁTICA**
-[1-2 líneas sobre coherencia del EV y Monte Carlo]
-
-**VEREDICTO**
-[emoji + dictamen en 1 línea clara]"""
-
+Responde únicamente con "Contexto Encontrado" (viñetas cortas) y tu "Veredicto Binario"."""
         r = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[{"google_search": {}}],
-                temperature=0.2,
-            )
+            model=GEMINI_MODEL, contents=prompt,
+            config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.2)
         )
         return r.text
-    except Exception as e:
-        return f"Error en análisis Gemini: {e}"
-
+    except Exception as e: return f"Error Gemini: {e}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
-    st.set_page_config(
-        page_title="Quantum Tennis v5 — Gemini",
-        page_icon="🎾",
-        layout="wide",
-    )
+    st.set_page_config(page_title="Quantum Tennis v6", page_icon="🎾", layout="wide")
 
-    # ── Header ────────────────────────────────────────────────────────────────
-    st.title("🎾 Quantum Tennis Engine v5.0 — Gemini Edition")
-    st.caption(
-        "Motor matemático local (Log5 · Monte Carlo) + "
-        "Gemini 2.5 Pro con Search Grounding para stats web y análisis H48"
-    )
+    st.title("🎾 Quantum Tennis Engine v6.0")
+    st.caption("Markov Chains Analíticas · Corrección Bayesiana Gaussiana · Gemini 2.5 Pro")
 
     if not gemini_available():
         st.error("⚠️ Falta GOOGLE_API_KEY en tu archivo .env")
         st.stop()
 
-    # ── Controles ─────────────────────────────────────────────────────────────
-    if "txt" not in st.session_state:
-        st.session_state.txt = ""
+    with st.sidebar:
+        st.header("🌍 Variables Físicas")
+        altitude_m = st.number_input("Altitud (m snm)", min_value=0, max_value=4000, value=0, step=100, help="A mayor altitud, menos densidad aerodinámica (+% Saque, -% Resto). Genera escenarios de Tie-break impredecibles.")
+        st.divider()
+        st.header("🤕 Índice Físico (Fatiga)")
+        st.caption("Penaliza severamente los reflejos al Resto")
+        fat_p1 = st.slider("Fatiga Jugador 1 (0=Fresco, 5=Exhausto)", 0, 5, 0)
+        fat_p2 = st.slider("Fatiga Jugador 2 (0=Fresco, 5=Exhausto)", 0, 5, 0)
+
+    if "txt" not in st.session_state: st.session_state.txt = ""
 
     c1, c2, c3 = st.columns([2, 1, 1])
-    with c1:
-        best_of = st.radio(
-            "Formato:", [3, 5], horizontal=True,
-            format_func=lambda x: f"Mejor de {x}"
-        )
-    with c2:
-        db_path = st.text_input("BD (.jsonl)", value=DB_PATH, label_visibility="collapsed")
+    with c1: best_of = st.radio("Formato:", [3, 5], horizontal=True, format_func=lambda x: f"Mejor de {x}")
+    with c2: db_path = st.text_input("BD", value=DB_PATH, label_visibility="collapsed")
     with c3:
         if st.button("🗑️ Limpiar", use_container_width=True):
             st.session_state.txt = ""
             st.rerun()
 
-    txt = st.text_area(
-        "📋 Pega los partidos (formato Caliente o 'Sinner -120 vs Alcaraz +100'):",
-        key="txt",
-        height=160,
-        placeholder="Alcaraz C\nSinner J\n-140\n+110",
-    )
+    txt = st.text_area("📋 Pega los partidos:", key="txt", height=160)
 
-    if not st.button("🚀 Analizar", type="primary", use_container_width=True):
-        return
-
-    if not txt.strip():
-        st.warning("Pega al menos un partido.")
-        return
+    if not st.button("🚀 Analizar M5 (Markov)", type="primary", use_container_width=True): return
+    if not txt.strip(): return
 
     partidos = parse_matches(txt)
     if not partidos:
-        st.error("No se encontraron pares jugador/cuota. Revisa el formato.")
-        with st.expander("Debug"):
-            st.code(txt)
+        st.error("Error de Parsing. Verifica el texto.")
         return
 
-    # ── Loop de partidos ──────────────────────────────────────────────────────
     for p1_raw, odd1, p2_raw, odd2 in partidos:
         p1 = p1_raw or "Jugador 1"
         p2 = p2_raw or "Jugador 2"
 
-        # Filtros rápidos
-        if "utr" in p1.lower() or "utr" in p2.lower():
-            st.warning(f"🚫 UTR excluido: {p1} vs {p2}")
-            continue
-        if odd1 and odd2 and (odd1 <= -500 or odd2 <= -500):
-            st.warning(f"🚫 Cuota extrema descartada: {p1} ({odd1}) vs {p2} ({odd2})")
-            continue
+        if "utr" in p1.lower() or "utr" in p2.lower(): continue
+        if odd1 and odd2 and (odd1 <= -500 or odd2 <= -500): continue
 
         st.divider()
         st.subheader(f"⚡ {p1}  vs  {p2}")
 
-        # ── Stats ─────────────────────────────────────────────────────────────
         col_s1, col_s2 = st.columns(2)
-
         with col_s1:
-            with st.spinner(f"Stats {p1}…"):
-                s1 = get_stats(p1, db_path)
-                if not s1:
-                    st.info(f"🌐 {p1} no está en BD local — buscando en web…")
-                    s1 = gemini_stats(p1)
-
+            s1 = get_stats(p1, db_path) or gemini_stats(p1)
         with col_s2:
-            with st.spinner(f"Stats {p2}…"):
-                s2 = get_stats(p2, db_path)
-                if not s2:
-                    st.info(f"🌐 {p2} no está en BD local — buscando en web…")
-                    s2 = gemini_stats(p2)
+            s2 = get_stats(p2, db_path) or gemini_stats(p2)
 
         if not s1 or not s2:
-            st.error("Stats insuficientes. Verifica el nombre o configura GOOGLE_API_KEY.")
+            st.error("Stats insuficientes.")
             continue
 
-        # ── Motor local ───────────────────────────────────────────────────────
-        pA = log5_serve(s1["spw"], s2["rpw"])
-        pB = log5_serve(s2["spw"], s1["rpw"])
+        # 1. Enfriamiento Bayesiano y Ajuste Físico
+        adj_spw1, adj_rpw1 = apply_realism_and_environment(s1["spw"], s1["rpw"], s1["n"], altitude_m, fat_p1)
+        adj_spw2, adj_rpw2 = apply_realism_and_environment(s2["spw"], s2["rpw"], s2["n"], altitude_m, fat_p2)
 
-        with st.spinner(f"Corriendo {MC_ITERATIONS:,} simulaciones…"):
-            mc_A = sim_match(pA, pB, best_of)
-            mc_B = 1 - mc_A
+        # 2. Base Log5 Serve (antes de ruido Gaussiano)
+        pA_base = log5_serve(adj_spw1, adj_rpw2)
+        pB_base = log5_serve(adj_spw2, adj_rpw1)
 
-        # ── Resultados matemáticos ────────────────────────────────────────────
-        st.markdown("#### 🧮 Motor Matemático")
+        with st.spinner(f"Compilando {MC_ITERATIONS:,} Redes de Markov estocásticas…"):
+            mc_A = simulate_match_quantum(pA_base, pB_base, best_of, altitude_m=altitude_m)
+            mc_B = 1.0 - mc_A
 
+        st.markdown("#### 🧮 Motor Matemático (Markov + Bayes)")
         m1, m2 = st.columns(2)
-        pairs = [(m1, p1, pA, mc_A, odd1, s1), (m2, p2, pB, mc_B, odd2, s2)]
+        pairs = [(m1, p1, pA_base, mc_A, odd1, s1, adj_spw1, adj_rpw1), (m2, p2, pB_base, mc_B, odd2, s2, adj_spw2, adj_rpw2)]
 
         ev_lines = []
-        for col, name, p_srv, mc_w, odd, stats in pairs:
+        for col, name, p_srv, mc_w, odd, stats, as_spw, as_rpw in pairs:
             col.markdown(f"**{name}**")
-            col.caption(
-                f"Fuente: {stats['source']} · n={stats['n']} · "
-                f"SPW {stats['spw']}% · RPW {stats['rpw']}% · "
-                f"Hold {stats['hold']}%"
-            )
-            col.metric("P(srv/punto) Log5", f"{p_srv*100:.1f}%")
-            col.metric("P(match) Monte Carlo", f"{mc_w*100:.1f}%")
+            col.caption(f"Stats Crudas ({stats['source']}, n={stats['n']}): SPW {stats['spw']}% / RPW {stats['rpw']}%")
+            col.caption(f"🧬 Física Corregida: SPW {as_spw:.1f}% / RPW {as_rpw:.1f}%")
+            col.metric("P(srv) Markov Base", f"{p_srv*100:.1f}%")
+            col.metric("P(match) Gaussiana", f"{mc_w*100:.1f}%")
 
             if odd:
                 nv1, nv2, f1, f2 = no_vig(odd1 or 100, odd2 or 100)
@@ -481,31 +426,21 @@ def main():
                 fair    = f1  if col is m1 else f2
                 ev_val  = ev(mc_w, american_to_decimal(odd))
                 edge    = (mc_w - nv_this) * 100
-                col.metric("P(match) Casa No-Vig", f"{nv_this*100:.1f}%",
-                           f"Fair odd {fair}", delta_color="off")
-                col.metric("💰 Expected Value", f"{ev_val*100:+.1f}%",
-                           delta_color="normal" if ev_val > 0 else "inverse")
-                col.metric("Edge vs Casa", f"{edge:+.1f}%")
-                ev_lines.append(f"{name}: EV={ev_val*100:+.2f}% | Edge={edge:+.1f}% | Cuota={odd}")
-            else:
-                col.info("Sin cuota → EV no calculable")
+                col.metric("P(Casa) No-Vig", f"{nv_this*100:.1f}%", f"Fair: {fair}", delta_color="off")
+                col.metric("💰 EV Return", f"{ev_val*100:+.1f}%", delta_color="normal" if ev_val > 0 else "inverse")
+                ev_lines.append(f"{name}: EV={ev_val*100:+.2f}%")
 
-        # ── Reporte para Gemini ───────────────────────────────────────────────
         report = f"""
-{p1}: SPW={s1['spw']}% RPW={s1['rpw']}% Hold={s1['hold']}% (n={s1['n']}, fuente={s1['source']})
-{p2}: SPW={s2['spw']}% RPW={s2['rpw']}% Hold={s2['hold']}% (n={s2['n']}, fuente={s2['source']})
-Log5 P(srv/punto): {p1}={pA:.3f} | {p2}={pB:.3f}
-Monte Carlo ({MC_ITERATIONS} iter, mejor de {best_of}): {p1}={mc_A*100:.1f}% | {p2}={mc_B*100:.1f}%
-{chr(10).join(ev_lines) if ev_lines else 'Sin cuotas ingresadas'}
+{p1} Corregido: SPW={adj_spw1:.1f}% RPW={adj_rpw1:.1f}% | P(Srv)={pA_base:.3f}
+{p2} Corregido: SPW={adj_spw2:.1f}% RPW={adj_rpw2:.1f}% | P(Srv)={pB_base:.3f}
+Gaussiana Fin: {mc_A*100:.1f}% vs {mc_B*100:.1f}%. Altitud={altitude_m}m.
+{chr(10).join(ev_lines) if ev_lines else 'Sin cuotas.'}
 """
 
-        # ── Gemini análisis completo ──────────────────────────────────────────
-        st.markdown("#### 🤖 Gemini — Análisis H48 + Veredicto")
-        with st.spinner("Gemini buscando contexto y generando veredicto…"):
-            analisis = gemini_full_analysis(p1, p2, report)
-
-        st.markdown(analisis)
-
+        st.markdown("#### 🤖 Gemini 2.5 Pro — Juez de Entorno H48")
+        with st.spinner("Conectando Search Grounding con Evaluador Final…"):
+            analisis = gemini_full_analysis(p1, p2, report, altitude_m)
+            st.info(analisis)
 
 if __name__ == "__main__":
     main()
