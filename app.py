@@ -542,3 +542,7 @@ def main():
                                     st.success(f"¡Resultó ganador: {w}!")
                     st.success("Auditoría Finalizada.")
                     st.rerun()
+
+
+if __name__ == "__main__":
+    main()
