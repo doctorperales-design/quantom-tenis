@@ -76,7 +76,8 @@ def log_prediction(match_id, p1, p2, p_mod, p_casa, odd, ev_val, tier, league):
             tier, "", league
         ])
         return True
-    except Exception:
+    except Exception as e:
+        st.error(f"Error escribiendo en Excel: {e}")
         return False
 
 def liquidar_partido(p1: str, p2: str) -> str:
