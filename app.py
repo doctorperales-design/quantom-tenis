@@ -44,6 +44,68 @@ def gemini_available() -> bool:
     return get_gemini_client() is not None
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ORÁCULO DOC (Google Sheets + Gspread + Pandas)
+# ─────────────────────────────────────────────────────────────────────────────
+import pandas as pd
+from datetime import datetime
+
+@st.cache_resource
+def get_sheet():
+    try:
+        import gspread
+        if "gcp_service_account" not in st.secrets:
+            return None
+        gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
+        sh = gc.open("Quantum_Oracle_Log")
+        return sh.sheet1
+    except Exception as e:
+        return None
+
+def log_prediction(match_id, p1_name, p2_name, p_mod, p_casa, odd_casa, ev_calc, tier):
+    sheet = get_sheet()
+    if not sheet: return False
+    
+    try:
+        records = sheet.col_values(1)
+        if match_id in records: return False
+            
+        sheet.append_row([
+            match_id,
+            datetime.now().strftime("%Y-%m-%d %H:%M"),
+            p1_name,
+            p2_name,
+            f"{p_mod*100:.1f}%",
+            f"{p_casa*100:.1f}%" if p_casa else "S/C",
+            str(odd_casa) if odd_casa else "S/C",
+            f"{ev_calc*100:+.1f}%" if ev_calc else "S/C",
+            tier,
+            ""
+        ])
+        return True
+    except:
+        return False
+
+def liquidar_partido(p1, p2):
+    client = get_gemini_client()
+    if not client: return ""
+    try:
+        prompt = f'''Eres un liquidador de resultados de tenis. 
+Busca el resultado final en Google del partido entre "{p1}" vs "{p2}" que se jugó en las últimas 48 horas.
+Si no se ha jugado o se pospuso, responde "PENDIENTE".
+Si ganó la persona 1 ("{p1}"), responde exactamente "GANA_P1".
+Si ganó la persona 2 ("{p2}"), responde exactamente "GANA_P2".'''
+        r = client.models.generate_content(
+            model="gemini-2.5-pro", contents=prompt,
+            config={"tools": [{"google_search": {}}], "temperature": 0.1}
+        )
+        t = r.text.upper()
+        if "GANA_P1" in t: return p1
+        if "GANA_P2" in t: return p2
+        return ""
+    except:
+        return ""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PARSER DE LÍNEAS DE SPORTSBOOK
 # ─────────────────────────────────────────────────────────────────────────────
 def extract_american_odds(text: str):
@@ -351,10 +413,9 @@ Manda ÚNICAMENTE un JSON crudo (sin backticks) con:
 # UI
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
-    st.set_page_config(page_title="Quantum Tennis v6", page_icon="🎾", layout="wide")
 
-    st.title("🎾 Quantum Tennis Engine v6.0")
-    st.caption("Markov Chains Analíticas · Corrección Bayesiana Gaussiana · Gemini 2.5 Pro")
+    st.title("🎾 Quantum Tennis Engine v6.5")
+    st.caption("Markov Chains Analíticas · Oráculo Cuantitativo · Gemini 2.5 Pro")
 
     if not gemini_available():
         st.error("⚠️ Falta GOOGLE_API_KEY en tu archivo .env")
@@ -362,92 +423,122 @@ def main():
 
     with st.sidebar:
         st.header("🌍 Variables Físicas")
-        altitude_m = st.number_input("Altitud (m snm)", min_value=0, max_value=4000, value=0, step=100, help="A mayor altitud, menos densidad aerodinámica (+% Saque, -% Resto). Genera escenarios de Tie-break impredecibles.")
+        altitude_m = st.number_input("Altitud (m snm)", min_value=0, max_value=4000, value=0, step=100)
         st.divider()
         st.header("🤕 Índice Físico (Fatiga)")
-        st.caption("Penaliza severamente los reflejos al Resto")
-        fat_p1 = st.slider("Fatiga Jugador 1 (0=Fresco, 5=Exhausto)", 0, 5, 0)
-        fat_p2 = st.slider("Fatiga Jugador 2 (0=Fresco, 5=Exhausto)", 0, 5, 0)
+        fat_p1 = st.slider("Fatiga Jugador 1", 0, 5, 0)
+        fat_p2 = st.slider("Fatiga Jugador 2", 0, 5, 0)
 
-    if "txt" not in st.session_state: st.session_state.txt = ""
+    tab_play, tab_oracle = st.tabs(["🎾 Analizador Quant", "🔮 El Oráculo"])
 
-    c1, c2, c3 = st.columns([2, 1, 1])
-    with c1: best_of = st.radio("Formato:", [3, 5], horizontal=True, format_func=lambda x: f"Mejor de {x}")
-    with c2: db_path = st.text_input("BD", value=DB_PATH, label_visibility="collapsed")
-    with c3:
-        if st.button("🗑️ Limpiar", use_container_width=True):
-            st.session_state.txt = ""
-            st.rerun()
+    with tab_play:
+        if "txt" not in st.session_state: st.session_state.txt = ""
+        c1, c2, c3 = st.columns([2, 1, 1])
+        with c1: best_of = st.radio("Formato:", [3, 5], horizontal=True)
+        with c2: db_path = st.text_input("BD", value=DB_PATH, label_visibility="collapsed")
+        with c3:
+            if st.button("🗑️ Limpiar", use_container_width=True):
+                st.session_state.txt = ""
+                st.rerun()
 
-    txt = st.text_area("📋 Pega los partidos:", key="txt", height=160)
+        txt = st.text_area("📋 Pega los partidos:", key="txt", height=160)
+        if not st.button("🚀 Analizar M5", type="primary", use_container_width=True): return
+        if not txt.strip(): return
 
-    if not st.button("🚀 Analizar M5 (Markov)", type="primary", use_container_width=True): return
-    if not txt.strip(): return
+        partidos = parse_matches(txt)
+        if not partidos:
+            st.error("Error de Parsing. Verifica el texto.")
+            return
 
-    partidos = parse_matches(txt)
-    if not partidos:
-        st.error("Error de Parsing. Verifica el texto.")
-        return
+        for p1_raw, odd1, p2_raw, odd2 in partidos:
+            p1 = p1_raw or "Jugador 1"
+            p2 = p2_raw or "Jugador 2"
+            if "utr" in p1.lower() or "utr" in p2.lower(): continue
+            if odd1 and odd2 and (odd1 <= -500 or odd2 <= -500): continue
 
-    for p1_raw, odd1, p2_raw, odd2 in partidos:
-        p1 = p1_raw or "Jugador 1"
-        p2 = p2_raw or "Jugador 2"
+            st.divider()
+            st.subheader(f"⚡ {p1}  vs  {p2}")
 
-        if "utr" in p1.lower() or "utr" in p2.lower(): continue
-        if odd1 and odd2 and (odd1 <= -500 or odd2 <= -500): continue
+            col_s1, col_s2 = st.columns(2)
+            with col_s1: s1 = get_stats(p1, db_path) or gemini_stats(p1)
+            with col_s2: s2 = get_stats(p2, db_path) or gemini_stats(p2)
+            if not s1 or not s2:
+                st.error("Stats insuficientes.")
+                continue
 
-        st.divider()
-        st.subheader(f"⚡ {p1}  vs  {p2}")
+            adj_spw1, adj_rpw1 = apply_realism_and_environment(s1["spw"], s1["rpw"], s1["n"], altitude_m, fat_p1)
+            adj_spw2, adj_rpw2 = apply_realism_and_environment(s2["spw"], s2["rpw"], s2["n"], altitude_m, fat_p2)
 
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            s1 = get_stats(p1, db_path) or gemini_stats(p1)
-        with col_s2:
-            s2 = get_stats(p2, db_path) or gemini_stats(p2)
+            pA_base = log5_serve(adj_spw1, adj_rpw2)
+            pB_base = log5_serve(adj_spw2, adj_rpw1)
 
-        if not s1 or not s2:
-            st.error("Stats insuficientes.")
-            continue
+            with st.spinner("Compilando Redes de Markov..."):
+                mc_A = simulate_match_quantum(pA_base, pB_base, best_of, altitude_m=altitude_m)
+                mc_B = 1.0 - mc_A
 
-        # 1. Enfriamiento Bayesiano y Ajuste Físico
-        adj_spw1, adj_rpw1 = apply_realism_and_environment(s1["spw"], s1["rpw"], s1["n"], altitude_m, fat_p1)
-        adj_spw2, adj_rpw2 = apply_realism_and_environment(s2["spw"], s2["rpw"], s2["n"], altitude_m, fat_p2)
+            m1, m2 = st.columns(2)
+            pairs = [(m1, p1, pA_base, mc_A, odd1, s1, adj_spw1, adj_rpw1), (m2, p2, pB_base, mc_B, odd2, s2, adj_spw2, adj_rpw2)]
 
-        # 2. Base Log5 Serve (antes de ruido Gaussiano)
-        pA_base = log5_serve(adj_spw1, adj_rpw2)
-        pB_base = log5_serve(adj_spw2, adj_rpw1)
+            ev_1, ev_2, tier_1, tier_2 = None, None, None, None
+            nv_p1, nv_p2 = None, None
 
-        with st.spinner(f"Compilando {MC_ITERATIONS:,} Redes de Markov estocásticas…"):
-            mc_A = simulate_match_quantum(pA_base, pB_base, best_of, altitude_m=altitude_m)
-            mc_B = 1.0 - mc_A
+            for col, name, p_srv, mc_w, odd, stats, as_spw, as_rpw in pairs:
+                col.markdown(f"**{name}**")
+                col.metric("P(match) Gaussiana", f"{mc_w*100:.1f}%")
+                if odd:
+                    nv1, nv2, f1, f2 = no_vig(odd1 or 100, odd2 or 100)
+                    nv_this = nv1 if col is m1 else nv2
+                    fair = f1 if col is m1 else f2
+                    ev_val = ev(mc_w, american_to_decimal(odd))
+                    tier = get_tier(mc_w, ev_val, nv_this)
+                    
+                    if col is m1: 
+                        ev_1 = ev_val; tier_1 = tier; nv_p1 = nv_this
+                    else: 
+                        ev_2 = ev_val; tier_2 = tier; nv_p2 = nv_this
+                        
+                    col.metric("P(Casa) No-Vig", f"{nv_this*100:.1f}%")
+                    col.metric("💰 EV Return", f"{ev_val*100:+.1f}%", delta_color="normal" if ev_val > 0 else "inverse")
+                    col.markdown(f"### {tier}")
+                else:
+                    tier = get_tier(mc_w, None, None)
+                    if col is m1: tier_1 = tier
+                    else: tier_2 = tier
+                    col.markdown(f"### {tier}")
 
-        st.markdown("#### 🧮 Motor Matemático (Markov + Bayes)")
-        m1, m2 = st.columns(2)
-        pairs = [(m1, p1, pA_base, mc_A, odd1, s1, adj_spw1, adj_rpw1), (m2, p2, pB_base, mc_B, odd2, s2, adj_spw2, adj_rpw2)]
+            mid_t1 = f"{p1}_vs_{p2}_{datetime.now().strftime('%Y%m%d')}"
+            mid_t2 = f"{p2}_vs_{p1}_{datetime.now().strftime('%Y%m%d')}"
+            if st.button("💾 Guardar en Oráculo", key=mid_t1):
+                if ev_1 is not None:
+                    log_prediction(mid_t1, p1, p2, mc_A, nv_p1, odd1, ev_1, tier_1)
+                    log_prediction(mid_t2, p2, p1, mc_B, nv_p2, odd2, ev_2, tier_2)
+                    st.success("Guardado en G. Sheets!")
+                else:
+                    st.warning("Sin cuotas no se puede auditar.")
 
-        ev_lines = []
-        for col, name, p_srv, mc_w, odd, stats, as_spw, as_rpw in pairs:
-            col.markdown(f"**{name}**")
-            col.caption(f"Stats Crudas ({stats['source']}, n={stats['n']}): SPW {stats['spw']}% / RPW {stats['rpw']}%")
-            col.caption(f"🧬 Física Corregida: SPW {as_spw:.1f}% / RPW {as_rpw:.1f}%")
-            col.metric("P(srv) Markov Base", f"{p_srv*100:.1f}%")
-            col.metric("P(match) Gaussiana", f"{mc_w*100:.1f}%")
-
-            if odd:
-                nv1, nv2, f1, f2 = no_vig(odd1 or 100, odd2 or 100)
-                nv_this = nv1 if col is m1 else nv2
-                fair    = f1  if col is m1 else f2
-                ev_val  = ev(mc_w, american_to_decimal(odd))
-                edge    = (mc_w - nv_this) * 100
-                tier    = get_tier(mc_w, ev_val, nv_this)
-                col.metric("P(Casa) No-Vig", f"{nv_this*100:.1f}%", f"Fair: {fair}", delta_color="off")
-                col.metric("💰 EV Return", f"{ev_val*100:+.1f}%", delta_color="normal" if ev_val > 0 else "inverse")
-                col.markdown(f"### {tier}")
-                ev_lines.append(f"{name}: EV={ev_val*100:+.2f}% | Tier: {tier}")
+    with tab_oracle:
+        st.header("📊 El Oráculo (Dashboard de Rentabilidad)")
+        sheet = get_sheet()
+        if not sheet:
+            st.warning("⚠️ No se ha detectado Google Sheets conectado.")
+            st.info("Agrega tu Service Account JSON a los Streamlit Secrets para activar el Logger Eterno.")
+        else:
+            data = sheet.get_all_records()
+            if not data:
+                st.info("Aún no hay predicciones guardadas.")
             else:
-                tier = get_tier(mc_w, None, None)
-                col.markdown(f"### {tier}")
-                ev_lines.append(f"{name}: S/C | Tier: {tier}")
-
-if __name__ == "__main__":
-    main()
+                df = pd.DataFrame(data)
+                st.dataframe(df.tail(10))
+                
+                # Liquidador
+                if st.button("🔎 Ejecutar Agente Liquidador de Resultados"):
+                    # Buscar partidos sin ganador
+                    for i, row in df.iterrows():
+                        if not row['Winner'] or row['Winner'] == '':
+                            with st.spinner(f"Liquidando {row['P1_Name']} vs {row['P2_Name']}..."):
+                                w = liquidar_partido(row['P1_Name'], row['P2_Name'])
+                                if w:
+                                    sheet.update_cell(i + 2, 9, w) # Columna 9 es Winner
+                                    st.success(f"¡Resultó ganador: {w}!")
+                    st.success("Auditoría Finalizada.")
+                    st.rerun()
