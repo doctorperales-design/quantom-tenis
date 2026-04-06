@@ -61,7 +61,7 @@ def get_sheet():
     except Exception as e:
         return None
 
-def log_prediction(match_id, p1_name, p2_name, p_mod, p_casa, odd_casa, ev_calc, tier):
+def log_prediction(match_id, p1_name, p2_name, p_mod, p_casa, odd_casa, ev_calc, tier, league):
     sheet = get_sheet()
     if not sheet: return False
     
@@ -79,7 +79,8 @@ def log_prediction(match_id, p1_name, p2_name, p_mod, p_casa, odd_casa, ev_calc,
             str(odd_casa) if odd_casa else "S/C",
             f"{ev_calc*100:+.1f}%" if ev_calc else "S/C",
             tier,
-            ""
+            "",
+            league
         ])
         return True
     except:
@@ -117,6 +118,7 @@ def extract_american_odds(text: str):
 def parse_matches(text: str) -> list[tuple]:
     text = text.replace('–', '-').replace('—', '-').replace('−', '-')
     results = []
+    current_league = "ATP/WTA"
     if re.search(r'(?i)\bvs\.?\b', text):
         for line in text.splitlines():
             line = line.strip()
@@ -127,7 +129,7 @@ def parse_matches(text: str) -> list[tuple]:
                 p1, o1 = extract_american_odds(parts[0])
                 p2, o2 = extract_american_odds(parts[1])
                 if p1 and p2:
-                    results.append((p1, o1, p2, o2))
+                    results.append((p1, o1, p2, o2, current_league))
         if results:
             return results
 
@@ -142,8 +144,13 @@ def parse_matches(text: str) -> list[tuple]:
         if not line:
             continue
         
-        # Búsqueda de palabra exacta para no ignorar nombres verdaderos (ej. "Mendez" contiene "men")
+        # Detección de Liga Dinámica al vuelo
         if any(re.search(rf'\b{re.escape(kw)}\b', line.lower()) for kw in METADATA_KW):
+            lower_line = line.lower()
+            if "itf" in lower_line or "world tennis" in lower_line: current_league = "ITF"
+            elif "challenger" in lower_line: current_league = "Challenger"
+            elif "atp" in lower_line: current_league = "ATP"
+            elif "wta" in lower_line or "women" in lower_line: current_league = "WTA"
             continue
         if DATE_TIME_RE.match(line) or COUNTER_RE.match(line):
             continue
@@ -163,7 +170,7 @@ def parse_matches(text: str) -> list[tuple]:
 
         while len(name_q) >= 2 and len(odd_q) >= 2:
             results.append((name_q.pop(0), odd_q.pop(0),
-                            name_q.pop(0), odd_q.pop(0)))
+                            name_q.pop(0), odd_q.pop(0), current_league))
 
     return results
 
@@ -445,12 +452,17 @@ def main():
         if not st.button("🚀 Analizar M5", type="primary", use_container_width=True): return
         if not txt.strip(): return
 
+        if "to_save_batch" not in st.session_state:
+            st.session_state.to_save_batch = []
+            
         partidos = parse_matches(txt)
         if not partidos:
             st.error("Error de Parsing. Verifica el texto.")
             return
 
-        for p1_raw, odd1, p2_raw, odd2 in partidos:
+        st.session_state.to_save_batch = [] # Reiniciamos el batch de memoria
+
+        for p1_raw, odd1, p2_raw, odd2, current_league in partidos:
             p1 = p1_raw or "Jugador 1"
             p2 = p2_raw or "Jugador 2"
             if "utr" in p1.lower() or "utr" in p2.lower(): continue
@@ -508,13 +520,23 @@ def main():
 
             mid_t1 = f"{p1}_vs_{p2}_{datetime.now().strftime('%Y%m%d')}"
             mid_t2 = f"{p2}_vs_{p1}_{datetime.now().strftime('%Y%m%d')}"
-            if st.button("💾 Guardar en Oráculo", key=mid_t1):
-                if ev_1 is not None:
-                    log_prediction(mid_t1, p1, p2, mc_A, nv_p1, odd1, ev_1, tier_1)
-                    log_prediction(mid_t2, p2, p1, mc_B, nv_p2, odd2, ev_2, tier_2)
-                    st.success("Guardado en G. Sheets!")
-                else:
-                    st.warning("Sin cuotas no se puede auditar.")
+            if ev_1 is not None:
+                st.session_state.to_save_batch.append((mid_t1, p1, p2, mc_A, nv_p1, odd1, ev_1, tier_1, current_league))
+                st.session_state.to_save_batch.append((mid_t2, p2, p1, mc_B, nv_p2, odd2, ev_2, tier_2, current_league))
+
+        # ── BOTÓN GIGANTE HASTA EL FINAL ──
+        if len(st.session_state.to_save_batch) > 0:
+            st.divider()
+            if st.button(f"💾 Guardar Oráculo ({len(st.session_state.to_save_batch)//2} partidos)", type="primary", use_container_width=True):
+                with st.spinner("Guardando bloque completo en Google Sheets..."):
+                    salvados = 0
+                    for data in st.session_state.to_save_batch:
+                        if log_prediction(*data): salvados += 1
+                    if salvados > 0:
+                        st.success(f"¡Éxito! Se inyectaron los datos de la Matrix.")
+                    else:
+                        st.info("Ya estaban guardados previamente (evitando duplicados).")
+                st.session_state.to_save_batch = []
 
     with tab_oracle:
         st.header("📊 El Oráculo (Dashboard de Rentabilidad)")
@@ -538,11 +560,7 @@ def main():
                             with st.spinner(f"Liquidando {row['P1_Name']} vs {row['P2_Name']}..."):
                                 w = liquidar_partido(row['P1_Name'], row['P2_Name'])
                                 if w:
-                                    sheet.update_cell(i + 2, 9, w) # Columna 9 es Winner
+                                    sheet.update_cell(i + 2, 10, w) # Columna 10 (J) es Winner
                                     st.success(f"¡Resultó ganador: {w}!")
                     st.success("Auditoría Finalizada.")
                     st.rerun()
-
-
-if __name__ == "__main__":
-    main()
