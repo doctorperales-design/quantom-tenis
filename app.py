@@ -53,7 +53,8 @@ def get_sheet():
             return None
         gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
         return gc.open("Quantum_Oracle_Log").sheet1
-    except Exception:
+    except Exception as e:
+        st.error(f"Error de Conexión o Permisos: {e}")
         return None
 
 def log_prediction(match_id, p1, p2, p_mod, p_casa, odd, ev_val, tier, league):
@@ -459,7 +460,7 @@ def main():
 
         txt = st.text_area(
             "📋 Pega los partidos:", key="txt", height=160,
-            placeholder="Alcaraz C\nSinner J\n-140\n+110"
+            placeholder="Alcaraz C\\nSinner J\\n-140\\n+110"
         )
 
         analizar = st.button("🚀 Analizar", type="primary", use_container_width=True)
@@ -561,7 +562,7 @@ def main():
 
                         # Gemini análisis
                         st.markdown("#### 🤖 Gemini — Análisis H48 + Veredicto")
-                        with st.spinner("Consultando Gemini Search…"):
+                        with st.spinner("Consultando Gemini Search…") :
                             st.markdown(gemini_analysis(p1, p2, report))
 
                         # Guardar batch
