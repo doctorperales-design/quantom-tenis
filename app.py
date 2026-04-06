@@ -605,10 +605,10 @@ def main():
                 if st.button("🔎 Ejecutar Agente Liquidador"):
                     for i, row in df.iterrows():
                         if not row.get("Winner", ""):
-                            with st.spinner(f"Liquidando {row['P1_Name']} vs {row['P2_Name']}…"):
-                                w = liquidar_partido(row["P1_Name"], row["P2_Name"])
+                            with st.spinner(f"Liquidando {row.get('P1_Name', 'P1')} vs {row.get('P2_Name', 'P2')}..."):
+                                w = liquidar_partido(row.get("P1_Name", ""), row.get("P2_Name", ""))
                             if w:
-                                sheet.update_cell(i + 2, 10, w)  # ✅ FIX: indentación correcta
+                                sheet.update_cell(i + 2, 10, w)
                                 st.success(f"Ganador: {w}")
                     st.success("Auditoría finalizada.")
                     st.rerun()
