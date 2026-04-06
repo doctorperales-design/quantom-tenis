@@ -580,8 +580,16 @@ def main():
                         n_partidos = len(st.session_state.save_batch) // 2
                         if st.button(f"💾 Guardar en Oráculo ({n_partidos} partidos)",
                                      type="primary", use_container_width=True):
+                            ok = 0
                             with st.spinner("Guardando en Google Sheets…"):
-                                ok = sum(1 for d in st.session_state.save_batch if log_prediction(*d))
+                                for d in st.session_state.save_batch:
+                                    try:
+                                        res = log_prediction(*d)
+                                        if res: ok += 1
+                                        else: st.warning(f"Rechazado (retornó False): {d[0]}")
+                                    except Exception as ex:
+                                        st.error(f"Falla fatal en iteración: {ex}")
+                            
                             if ok > 0: st.success(f"✅ {ok//2} partidos guardados en el Oráculo.")
                             else:      st.info("Ya estaban guardados (sin duplicados).")
                             st.session_state.save_batch = []
