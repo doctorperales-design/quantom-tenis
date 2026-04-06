@@ -52,7 +52,8 @@ def get_sheet():
         if "gcp_service_account" not in st.secrets:
             return None
         gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
-        return gc.open("Quantum_Oracle_Log").sheet1
+        sheet_url = "https://docs.google.com/spreadsheets/d/1kciFhxjiVOeScsu_7e6UZvJ36ungHyeQxjIW"
+        return gc.open_by_url(sheet_url).sheet1
     except Exception as e:
         st.error(f"Error de Conexión o Permisos: {e}")
         return None
