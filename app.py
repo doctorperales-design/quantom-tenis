@@ -563,4 +563,8 @@ def main():
                                     sheet.update_cell(i + 2, 10, w) # Columna 10 (J) es Winner
                                     st.success(f"¡Resultó ganador: {w}!")
                     st.success("Auditoría Finalizada.")
+
+  if __name__ == "__main__":
+    main()
+                  
                     st.rerun()
