@@ -559,12 +559,11 @@ def main():
                         if not row['Winner'] or row['Winner'] == '':
                             with st.spinner(f"Liquidando {row['P1_Name']} vs {row['P2_Name']}..."):
                                 w = liquidar_partido(row['P1_Name'], row['P2_Name'])
-                                if w:
+                ca                if w:
                                     sheet.update_cell(i + 2, 10, w) # Columna 10 (J) es Winner
                                     st.success(f"¡Resultó ganador: {w}!")
                     st.success("Auditoría Finalizada.")
-
-  if __name__ == "__main__":
-    main()
-                  
                     st.rerun()
+
+if __name__ == "__main__":
+    main()
