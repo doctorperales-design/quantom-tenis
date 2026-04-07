@@ -86,23 +86,29 @@ def liquidar_partido(p1: str, p2: str) -> str:
         return ""
     try:
         prompt = (
-            f'Busca el resultado final del partido de tenis entre "{p1}" vs "{p2}" '
-            f'jugado en las últimas 48 horas.\n'
-            f'Si no se jugó o se pospuso responde "PENDIENTE".\n'
-            f'Si ganó "{p1}" responde exactamente "GANA_P1".\n'
-            f'Si ganó "{p2}" responde exactamente "GANA_P2".'
+            f"Busca en Google usando Flashscore o webs de tenis el resultado final del partido entre '{p1}' y '{p2}' "
+            f"jugado en las últimas horas.\n"
+            f"REGLA 1: Si el partido ya terminó, dime ÚNICAMENTE el NOMBRE COMPLETO del ganador (sin explicaciones).\n"
+            f"REGLA 2: Si el partido no se ha jugado, sigue en vivo o está cancelado, responde exactamente la palabra 'PENDIENTE'."
         )
         r = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=prompt,
-            config=types.GenerateContentConfig(          # ✅ FIX: antes era dict plano
+            config=types.GenerateContentConfig(
                 tools=[{"google_search": {}}],
-                temperature=0.1,
+                temperature=0.0,
             )
         )
-        t = r.text.upper()
-        if "GANA_P1" in t: return p1
-        if "GANA_P2" in t: return p2
+        t = r.text.upper().strip()
+        if "PENDIENTE" in t: return ""
+        
+        p1_upper = p1.upper()
+        p2_upper = p2.upper()
+        p1_last = p1_upper.split()[-1] if " " in p1_upper else p1_upper
+        p2_last = p2_upper.split()[-1] if " " in p2_upper else p2_upper
+        
+        if p1_upper in t or p1_last in t: return p1
+        if p2_upper in t or p2_last in t: return p2
         return ""
     except Exception:
         return ""
@@ -148,6 +154,15 @@ def parse_matches(text: str) -> list[tuple]:
         if not line:
             continue
 
+        # Extraer cuotas primerísimamente para que LOCAL +260 no se borre junto
+        odds_match = re.findall(r'[+-]\d{3,4}', line)
+        if odds_match:
+            for o in odds_match:
+                odd_q.append(int(o))
+            line = re.sub(r'[+-]\d{3,4}.*', '', line).strip()
+            if not line:
+                continue
+
         low = line.lower()
         if any(kw in low for kw in METADATA_KW):
             if "itf" in low or "world tennis" in low: cur_league = "ITF"
@@ -159,18 +174,7 @@ def parse_matches(text: str) -> list[tuple]:
         if DATE_RE.match(line) or COUNTER_RE.match(line):
             continue
 
-        odds_in = re.findall(r'[+-]\d{3,4}', line)
-
-        if ODD_LONE.match(line):
-            odd_q.append(int(line))
-        elif odds_in:
-            for o in odds_in:
-                odd_q.append(int(o))
-            name_part = re.sub(r'[+-]\d{3,4}.*', '', line).strip()
-            if name_part:
-                name_q.append(name_part)
-        else:
-            name_q.append(line)
+        name_q.append(line)
 
         while len(name_q) >= 2 and len(odd_q) >= 2:
             results.append((name_q.pop(0), odd_q.pop(0),
