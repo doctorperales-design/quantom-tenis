@@ -381,7 +381,7 @@ def gemini_analysis(p1: str, p2: str, report: str) -> str:
     client = get_gemini_client()
     if not client: return "❌ Sin API Key."
     try:
-        prompt = f"""Eres un analista cuantitativo de apuestas de tenis.
+        prompt = f"""Eres un analista estadístico deportivo cuantitativo.
 
 PASO 1 — CONTEXTO H48 (busca en Google):
 Hechos objetivos de las últimas 48h sobre {p1} y {p2}:
@@ -390,20 +390,20 @@ Hechos objetivos de las últimas 48h sobre {p1} y {p2}:
 - Cambios de superficie o viajes largos
 
 PASO 2 — AUDITORÍA MATEMÁTICA:
-Analiza este reporte (Markov + Gaussiana + Monte Carlo):
+Analiza este reporte numérico (Markov + Gaussiana + Monte Carlo):
 {report}
 
-PASO 3 — VEREDICTO (reglas estrictas):
-- EV > 5% Y sin alertas físicas → ✅ VERDE — Apostar
-- 0% < EV ≤ 5% O fatiga menor → ⚠️ AMARILLO — Reducir stake
-- EV negativo O lesión confirmada → 🚫 ROJO — Evitar
+PASO 3 — VEREDICTO (reglas de clasificación):
+- Expectativa Positiva Y sin alertas físicas → ✅ VERDE — Favorable
+- Rango neutro O fatiga menor → ⚠️ AMARILLO — Precaución
+- Expectativa negativa O lesión confirmada → 🚫 ROJO — Desfavorable
 
 Formato:
 **CONTEXTO H48**
 [viñetas con hechos o "Sin alertas detectadas"]
 
 **AUDITORÍA**
-[1-2 líneas sobre coherencia del EV]
+[1-2 líneas analizando la coherencia estadística]
 
 **VEREDICTO**
 [emoji + dictamen en 1 línea]"""
@@ -414,7 +414,7 @@ Formato:
                 tools=[{"google_search": {}}], temperature=0.2
             )
         )
-        return r.text
+        return r.text if r.text else "⚠️ Búsqueda restringida (Google rechazó devolver texto)."
     except Exception as e:
         return f"Error análisis Gemini: {e}"
 
