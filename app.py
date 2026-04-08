@@ -395,7 +395,7 @@ Analiza este reporte numérico (Markov + Gaussiana + Monte Carlo):
 
 PASO 3 — VEREDICTO (reglas de clasificación):
 - Expectativa Positiva Y sin alertas físicas → ✅ VERDE — Favorable
-- Rango neutro O fatiga menor → ⚠️ AMARILLO — Precaución
+- Rango neutro O fatiga menor → ⚠️ AMARILLO — Reducir exposición
 - Expectativa negativa O lesión confirmada → 🚫 ROJO — Desfavorable
 
 Formato:
@@ -411,10 +411,30 @@ Formato:
         r = client.models.generate_content(
             model=GEMINI_MODEL, contents=prompt,
             config=types.GenerateContentConfig(
-                tools=[{"google_search": {}}], temperature=0.2
+                tools=[{"google_search": {}}], 
+                temperature=0.2,
+                safety_settings=[
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+                    ),
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+                    ),
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+                    ),
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+                    ),
+                ]
             )
         )
-        return r.text if r.text else "⚠️ Búsqueda restringida (Google rechazó devolver texto)."
+        # Si Google bloquea por seguridad extrema, soltará vacío.
+        return r.text if r.text else "⚠️ Búsqueda restringida (posible resultado de apuestas ocultado por Google)."
     except Exception as e:
         return f"Error análisis Gemini: {e}"
 
