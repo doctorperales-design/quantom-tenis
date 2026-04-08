@@ -380,9 +380,9 @@ def gemini_stats(name: str) -> dict:
 def gemini_analysis(p1: str, p2: str, report: str) -> str:
     client = get_gemini_client()
     if not client: return "❌ Sin API Key."
-    try:
-        prompt = f"""Eres un analista estadístico deportivo cuantitativo.
-
+    
+    prompt = f"""Eres un analista estadístico deportivo cuantitativo.
+    
 PASO 1 — CONTEXTO H48 (busca en Google):
 Hechos objetivos de las últimas 48h sobre {p1} y {p2}:
 - Partidos recientes (duración, esfuerzo físico)
@@ -408,33 +408,52 @@ Formato:
 **VEREDICTO**
 [emoji + dictamen en 1 línea]"""
 
+    try:
         r = client.models.generate_content(
             model=GEMINI_MODEL, contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[{"google_search": {}}], 
                 temperature=0.2,
                 safety_settings=[
-                    types.SafetySetting(
-                        category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                        threshold=types.HarmBlockThreshold.BLOCK_NONE,
-                    ),
-                    types.SafetySetting(
-                        category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                        threshold=types.HarmBlockThreshold.BLOCK_NONE,
-                    ),
-                    types.SafetySetting(
-                        category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                        threshold=types.HarmBlockThreshold.BLOCK_NONE,
-                    ),
-                    types.SafetySetting(
-                        category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                        threshold=types.HarmBlockThreshold.BLOCK_NONE,
-                    ),
+                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
                 ]
             )
         )
-        # Si Google bloquea por seguridad extrema, soltará vacío.
-        return r.text if r.text else "⚠️ Búsqueda restringida (posible resultado de apuestas ocultado por Google)."
+        if r.text:
+            return r.text
+            
+        # Si Google bloquea la búsqueda (común en ITF donde solo hay sitios de apuestas)
+        # Hacemos un fallback SIN el buscador de Google para rescatar el análisis matemático
+        prompt_fallback = f"""Eres un analista estadístico cuantitativo.
+(Búsqueda en vivo restringida para {p1} vs {p2}. Operando solo con datos matemáticos).
+
+Analiza estrictamente este reporte numérico:
+{report}
+
+Reglas de VEREDICTO:
+- Expectativa Positiva → ✅ VERDE — Favorable
+- Rango neutro → ⚠️ AMARILLO — Reducir exposición
+- Expectativa negativa → 🚫 ROJO — Desfavorable
+
+Formato:
+**CONTEXTO H48**
+⚠️ Búsqueda restringida (Jugadores confidenciales o partidos sin cobertura pública).
+
+**AUDITORÍA**
+[Análisis de la coherencia estadística]
+
+**VEREDICTO**
+[emoji + dictamen en 1 línea]"""
+
+        r_fallback = client.models.generate_content(
+            model=GEMINI_MODEL, contents=prompt_fallback,
+            config=types.GenerateContentConfig(temperature=0.2)
+        )
+        return r_fallback.text if r_fallback.text else "⚠️ Búsqueda y Análisis bloqueados."
+        
     except Exception as e:
         return f"Error análisis Gemini: {e}"
 
