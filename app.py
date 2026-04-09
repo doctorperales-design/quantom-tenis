@@ -180,6 +180,10 @@ def parse_matches(text: str) -> list[tuple]:
             results.append((name_q.pop(0), odd_q.pop(0),
                             name_q.pop(0), odd_q.pop(0), cur_league))
 
+    while len(name_q) >= 2 and len(odd_q) >= 2:
+        results.append((name_q.pop(0), odd_q.pop(0),
+                        name_q.pop(0), odd_q.pop(0), cur_league))
+
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -396,6 +400,7 @@ Analiza este reporte numérico (Markov + Gaussiana + Monte Carlo):
 PASO 3 — VEREDICTO (reglas de clasificación):
 - Expectativa Positiva Y sin alertas físicas → ✅ VERDE — Favorable
 - Rango neutro O fatiga menor → ⚠️ AMARILLO — Reducir exposición
+- Si P(Victoria) > 75% pero la Expectativa es negativa por la cuota → 🔵 FAVORITO SEGURO — Bajo Valor Apostable
 - Expectativa negativa O lesión confirmada → 🚫 ROJO — Desfavorable
 
 Formato:
@@ -436,6 +441,7 @@ Analiza estrictamente este reporte numérico:
 Reglas de VEREDICTO:
 - Expectativa Positiva → ✅ VERDE — Favorable
 - Rango neutro → ⚠️ AMARILLO — Reducir exposición
+- Si P(Victoria) > 75% pero la Expectativa es negativa por la cuota → 🔵 FAVORITO SEGURO — Bajo Valor Apostable
 - Expectativa negativa → 🚫 ROJO — Desfavorable
 
 Formato:
@@ -640,6 +646,60 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     with tab_oracle:
         st.header("📊 El Oráculo — Dashboard de Rentabilidad")
+        
+        with st.expander("🛠️ Mantenimiento de BD (Temporal)", expanded=False):
+            st.info("Inyección manual de 18 ganadores y 8 purgas")
+            if st.button("Ejecutar Mantenimiento de BD", type="primary"):
+                sheet = get_sheet()
+                if sheet:
+                    try:
+                        ganadores = [
+                            ("M. Summers", "M. Dellavedova", "Matthew Dellavedova"),
+                            ("R. Sramkova", "Lola Radivojevic", "Lola Radivojevic"),
+                            ("F. Curmi", "Alena Kovackova", "Alena Kovackova"),
+                            ("Philip Henning", "Florent Bax", "Florent Bax"),
+                            ("Max Houkes", "Max Schoenhaus", "Max Schoenhaus"),
+                            ("Nguyen Tan", "Falkowska", "Lucie Nguyen Tan"),
+                            ("Briana Szabo", "Noemi Basiletti", "Noemi Basiletti"),
+                            ("Kotov", "Holmgren", "Pavel Kotov"),
+                            ("Vacherot", "Musetti", "Valentin Vacherot"),
+                            ("Zverev", "Garín", "Alexander Zverev"),
+                            ("Johns", "Galán", "Garrett Johns"),
+                            ("Díaz Acosta", "Ribeiro", "Facundo Díaz Acosta"),
+                            ("Sandro Kopp", "Den Ouden", "Sandro Kopp"),
+                            ("Manon Leonard", "Laboutkova", "Manon Leonard"),
+                            ("Alina Granwehr", "Berecoechea", "Alina Granwehr"),
+                            ("Planinsek", "Rapagnetta", "Filip Jeff Planinsek"),
+                            ("Shubladze", "Zolotareva", "Alexandra Shubladze"),
+                            ("Charlotte", "Compuesto", "Charlotte Vanstone McGrath")
+                        ]
+                        errores = [
+                            "Jennifer", "Madison Sieg", "Bublik", 
+                            "Samuel", "Giles Hussey", "Moerani", 
+                            "Bogdan", "Rybakov", "Ovcharenko"
+                        ]
+                        
+                        data = sheet.get_all_records()
+                        for i in range(len(data) - 1, -1, -1):
+                            row = data[i]
+                            p1, p2 = str(row.get("P1_Name", "")), str(row.get("P2_Name", ""))
+                            is_err = any(err.lower() in p1.lower() or err.lower() in p2.lower() for err in errores)
+                            if is_err:
+                                sheet.delete_rows(i + 2)
+                                st.write(f"🗑️ {p1} vs {p2}")
+                                continue
+                                
+                            for kp1, kp2, w in ganadores:
+                                if kp1.lower() in p1.lower() and kp2.lower() in p2.lower():
+                                    if not row.get("Winner", ""):
+                                        sheet.update_cell(i + 2, 10, w)
+                                        st.write(f"✅ Inyectado: {w}")
+                        st.success("¡Base de Datos Purificada! Puedes borrar esta herramienta.")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                else:
+                    st.error("No hay conexión a Google Sheets")
+
         sheet = get_sheet()
 
         if not sheet:
