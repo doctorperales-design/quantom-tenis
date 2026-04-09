@@ -468,11 +468,80 @@ Formato:
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
-        page_title="Quantum Tennis v6.5",
+        page_title="Quantum Tennis v7.0",
         page_icon="🎾", layout="wide"
     )
-    st.title("🎾 Quantum Tennis Engine v6.5 — Gemini Quant")
+    st.title("🎾 Quantum Tennis Engine v7.0 — Edición Quant")
     st.caption("Markov Chains · Shrinkage Bayesiano · Gaussiana Diaria · Oráculo Google Sheets")
+
+    st.markdown("""
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+        html, body, [class*="css"]  {
+            font-family: 'Inter', sans-serif;
+        }
+        
+        [data-testid="stMetricValue"] {
+            font-size: 1.8rem !important;
+            font-weight: 800 !important;
+        }
+        
+        [data-testid="stMetricDelta"] {
+            font-size: 1.1rem !important;
+            font-weight: 600 !important;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.05);
+        }
+        
+        /* Badges de Tier */
+        .tier-badge {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-weight: 800;
+            font-size: 1.05rem;
+            text-align: center;
+            width: 100%;
+            margin-top: 10px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+            border: 1px solid rgba(255,255,255,0.1);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .tier-rojo { background: linear-gradient(135deg, #4a0000 0%, #220000 100%); color: #ff6666; border-color: #ff3333; }
+        .tier-amar { background: linear-gradient(135deg, #4a3800 0%, #221a00 100%); color: #ffcc00; border-color: #ffaa00; }
+        .tier-verd { background: linear-gradient(135deg, #004a11 0%, #002208 100%); color: #44ff66; border-color: #00ff33; box-shadow: 0 0 15px rgba(0, 255, 51, 0.2); }
+        .tier-favo { background: linear-gradient(135deg, #002b4a 0%, #001222 100%); color: #44aaff; border-color: #0088ff; }
+        .tier-supe { background: linear-gradient(135deg, #4a004a 0%, #220022 100%); color: #ff44ff; border-color: #aa00ff; box-shadow: 0 0 20px rgba(170,0,255,0.5); }
+        
+        /* Botones Primarios */
+        button[kind="primary"] {
+            background: linear-gradient(135deg, #0d965e 0%, #086d42 100%) !important;
+            box-shadow: 0 4px 15px rgba(13, 150, 94, 0.4) !important;
+            border: none !important;
+            font-weight: 800 !important;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            border-radius: 8px !important;
+            transition: all 0.2s ease-in-out !important;
+        }
+        button[kind="primary"]:hover {
+            transform: scale(1.02);
+            box-shadow: 0 6px 20px rgba(13, 150, 94, 0.6) !important;
+        }
+        
+        /* Textarea input */
+        .stTextArea textarea {
+            background-color: #111111 !important;
+            border: 1px solid #333 !important;
+            color: #00ff9d !important;
+            font-family: monospace;
+            font-size: 15px !important;
+            border-radius: 8px !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
     if not gemini_available():
         st.error("⚠️ Falta GOOGLE_API_KEY en tu archivo .env")
@@ -594,12 +663,24 @@ def main():
                                 col.metric("💰 EV Return", f"{ev_val*100:+.1f}%",
                                            delta_color="normal" if ev_val > 0 else "inverse")
                                 col.metric("Edge vs Casa", f"{(mc_w-nv_this)*100:+.1f}%")
-                                col.markdown(f"### {tier}")
+                                
+                                if "SÚPER DERECHA" in tier: html_c = "tier-supe"
+                                elif "DERECHA" in tier or "FRANCOTIRADOR" in tier: html_c = "tier-verd"
+                                elif "FAVORITO" in tier: html_c = "tier-favo"
+                                elif "VALOR" in tier: html_c = "tier-amar"
+                                else: html_c = "tier-rojo"
+                                col.markdown(f'<div class="tier-badge {html_c}">{tier}</div>', unsafe_allow_html=True)
                             else:
                                 tier = get_tier(mc_w, None, None)
                                 if col is m1: tier1 = tier
                                 else:         tier2 = tier
-                                col.markdown(f"### {tier}")
+                                
+                                if "SÚPER DERECHA" in tier: html_c = "tier-supe"
+                                elif "DERECHA" in tier or "FRANCOTIRADOR" in tier: html_c = "tier-verd"
+                                elif "FAVORITO" in tier: html_c = "tier-favo"
+                                elif "VALOR" in tier: html_c = "tier-amar"
+                                else: html_c = "tier-rojo"
+                                col.markdown(f'<div class="tier-badge {html_c}">{tier}</div>', unsafe_allow_html=True)
 
                         # Reporte
                         report = (
