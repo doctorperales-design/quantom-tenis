@@ -333,14 +333,14 @@ def gemini_stats(name: str, surface: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # AUDITORÍA PROFUNDA H48
 # ─────────────────────────────────────────────────────────────────────────────
-def gemini_analysis(p1: str, p2: str, report: str) -> str:
+def gemini_analysis(p1: str, p2: str) -> str:
     c = get_gemini_client()
     if not c: return "❌ Sin API."
     prompt = f"""Quantum Analyst v14. 
-Paso 1: BUSCA en Google lesiones o fatiga extremas (>2h30 ayer) de {p1} y {p2}. Si no, di "Sin Alertas".
-Paso 2: AUDITA el EV vs Probabilidad Matemática. Si detectas anomalías financieras bájalo a ROJO.
-Paso 3: VEREDICTO en 1 línea con Emoji. 
-Reporte original: {report}"""
+Paso 1: BUSCA RÁPIDO en Google noticias de última hora sobre {p1} y {p2}.
+Paso 2: REPORTA ÚNICAMENTE si encuentras lesiones, retiros recientes o fatiga extrema demostrable (partidos larguísimos ayer).
+Paso 3: Si no hay noticias graves de lesiones físicas, di explícitamente "🟢 Sin Alertas Físicas (Camino Libre)". 
+No intentes analizar los números o probabilidades de cómo será el partido. Limítate a buscar estado médico/físico de las últimas 48 hrs."""
     try:
         r = c.models.generate_content(model=GEMINI_MODEL, contents=prompt, config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.1))
         return r.text
@@ -477,9 +477,8 @@ def main():
                             with cl.expander("👁️ Ver Autodiagnóstico"): 
                                 for x in nn: st.caption(x)
 
-                    rep = f"{p1} vs {p2} | Log5={pA_b:.2f} | MC={mc_cal:.2f} | EV={e1}"
-                    st.markdown("#### 📡 H48 Inteligente")
-                    with st.spinner("Validando noticias en la WEB..."): st.info(gemini_analysis(p1, p2, rep))
+                    st.markdown("#### 📡 H48 Médico / Físico")
+                    with st.spinner("Validando noticias en la WEB..."): st.info(gemini_analysis(p1, p2))
                     
                     if e1 is not None:
                         mid = f"{p1}_{p2}_{datetime.now().strftime('%Y%m%d')}"
