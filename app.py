@@ -384,15 +384,18 @@ def main():
         fat_p1, fat_p2 = st.slider("Fatiga P1",0,5,0), st.slider("Fatiga P2",0,5,0)
         iters = st.select_slider("MC Iters", [1000,3000,5000,10000], 5000)
 
+    if "txt" not in st.session_state: st.session_state.txt = ""
     t1, t2 = st.tabs(["🎾 Motor Analítico", "🔮 El Oráculo"])
     
     with t1:
         c1, c2, c3 = st.columns([2, 1, 1])
         with c1: bo = st.radio("Súper Formato", [3, 5], horizontal=True, format_func=lambda x: f"Bo{x}")
         with c3:
-            if st.button("🗑️ Limpiar", use_container_width=True): st.rerun()
+            if st.button("🗑️ Limpiar", use_container_width=True): 
+                st.session_state.txt = ""
+                st.rerun()
 
-        txt = st.text_area("📋 Pega tus partidos:", height=160, placeholder="Sinner J\nAlcaraz C\n-140\n+110")
+        txt = st.text_area("📋 Pega tus partidos:", key="txt", height=160, placeholder="Sinner J\nAlcaraz C\n-140\n+110")
         if st.button("🚀 Ignición Autónoma", type="primary", use_container_width=True):
             pts = parse_matches(txt)
             if not pts: st.error("No se detectaron emparejamientos. Sombrea las cuotas hasta el final.")
@@ -456,8 +459,9 @@ def main():
 
                         if o1 and o2:
                             nvv, fv = no_vig(o1,o2)[0 if cl is m1 else 1], no_vig(o1,o2)[2 if cl is m1 else 3]
-                            evv = ev(mc, o)
-                            kf = kelly_fraction(mc, american_to_decimal(o))
+                            dec_odd = american_to_decimal(o)
+                            evv = ev(mc, dec_odd)
+                            kf = kelly_fraction(mc, dec_odd)
                             tr = get_tier(mc, evv, nvv)
                             if cl is m1: e1, nv1, t1c = evv, nvv, tr
                             else: e2, nv2, t2c = evv, nvv, tr
