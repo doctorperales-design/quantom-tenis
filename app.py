@@ -335,12 +335,17 @@ def gemini_stats(name: str, surface: str) -> dict:
     c = get_gemini_client()
     if not c: return {"n":1,"spw":55.0,"rpw":40.0,"source":"Sin API"}
     try:
+        req = f"Estima SPW (puntos saque ganados %) y RPW (devolución %) de {name} en {surface} últimos meses. SOLO devuelve JSON crudo: {{\"spw\": 62.5, \"rpw\": 39.2}}"
         r = c.models.generate_content(
-            model=GEMINI_MODEL, contents=f'{"{spw:64.5, rpw:38.2}"} de {name} en {surface} ultimos meses. SOLO JSON CRUDO.',
-            config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.1)
+            model=GEMINI_MODEL, contents=req,
+            config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.2)
         )
-        d = json.loads(re.search(r'\{.*?\}', r.text.replace('\n', '')).group(0))
-        return {"n":5,"spw":float(d.get("spw", 55.0)),"rpw":float(d.get("rpw", 40.0)),"source":"Gemini Web"}
+        t = r.text.replace('```json', '').replace('```', '').strip()
+        s, e = t.find('{'), t.rfind('}')
+        if s != -1 and e != -1:
+            d = json.loads(t[s:e+1])
+            return {"n":5,"spw":float(d.get("spw", 55.0)),"rpw":float(d.get("rpw", 40.0)),"source":"Gemini Web"}
+        return {"n":1,"spw":55.0,"rpw":40.0,"source":"Gemini Fallback"}
     except: return {"n":1,"spw":55.0,"rpw":40.0,"source":"Gemini Fallback"}
 
 # ─────────────────────────────────────────────────────────────────────────────
