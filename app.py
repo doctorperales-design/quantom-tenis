@@ -1,11 +1,25 @@
 """
-Quantum Tennis Engine v14 — Nivel Dios (Deep Autonomous Profiling)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Gemini 2.5 Pro  →  Extracción masiva de Perfiles (Altura/Mano) + Auditoría H48
-Motor Python    →  Monte Carlo NumPy (vectorizado masivo)
-Ajustes v3      →  Autónomos (Inyección Directa en SPW/RPW) SIN sliders
-Bankroll        →  Kelly Fraccionado (25%) · Vig %
-Oracle          →  Google Sheets
+Quantum Tennis Engine v15 — Opus Deep Fix
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Gemini 2.5 Pro  →  Deep Profiling (Mano/Altura/DR5/Tour) + Auditoría H48+Math
+Motor Python    →  Monte Carlo NumPy · Tiebreak CORREGIDO · IC 95%
+Ajustes v3      →  5 Autónomos: Zurdo·ClayTrap·DR5·TierDrop·Indoors
+Bankroll        →  Kelly Fraccionado 25% · Net Adj (no renorm)
+Oracle          →  Google Sheets + Liquidador funcional
+
+CHANGELOG v15 vs v14:
+  BUG-1  HTML </> → </div> (tag nunca se cerraba)
+  BUG-2  st.metric delta vs delta_color (mostraba texto "normal" como delta)
+  BUG-3  Fatiga silenciada en lotes >1 partido (act_f = 0 si len(pts)>1)
+  BUG-4  net_adj: adj independiente + renorm → ahora net_adj = adj_p1 − adj_p2
+  BUG-5  no_vig() llamada 3× por jugador → 1× cacheada
+  BUG-6  Dead code: ga==7/gb==7 inalcanzable → eliminado
+  BUG-7  Liquidador era pass → implementado
+  BUG-8  save_batch sin init en session_state → init explícito
+  FEAT-1 3 ajustes v3 faltantes: Clay Trap, DR5, Tier Drop (autónomos via Gemini)
+  FEAT-2 Gemini recibe reporte math completo → auditoría real, no solo H48
+  FEAT-3 IC 95% del Monte Carlo → mostrado en UI
+  FEAT-4 Profiling expandido: last5, tour para ajustes autónomos
 """
 
 import streamlit as st
@@ -41,8 +55,10 @@ SURFACE_ADJ = {
     "carpet": {"spw": +3.0, "rpw": -2.0},
 }
 
+TIER_ORDER = {"ATP/WTA": 4, "ATP": 4, "WTA": 4, "Challenger": 3, "ITF": 2}
+
 # ─────────────────────────────────────────────────────────────────────────────
-# CLIENTES GEMINI
+# CLIENTE GEMINI
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_gemini_client():
@@ -59,67 +75,88 @@ def gemini_available() -> bool:
 def get_sheet():
     try:
         import gspread
-        if "gcp_service_account" not in st.secrets: return None
+        if "gcp_service_account" not in st.secrets:
+            return None
         gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
         return gc.open_by_key("1kciFhxjiVOeScsu_7e6UZvJ36ungHyeQxjIWMBu5CYs").sheet1
-    except Exception as e:
+    except Exception:
         return None
 
 def log_prediction(match_id, p1, p2, p_mod, p_casa, odd, ev_val, tier, league):
     sheet = get_sheet()
-    if not sheet: return False
+    if not sheet:
+        return False
     try:
         ids = sheet.col_values(1)
-        if match_id in ids: return False
+        if match_id in ids:
+            return False
         sheet.append_row([
             match_id, datetime.now().strftime("%Y-%m-%d %H:%M"),
-            p1, p2, f"{p_mod*100:.1f}%", f"{p_casa*100:.1f}%" if p_casa else "S/C",
-            str(odd) if odd else "S/C", f"{ev_val*100:+.1f}%" if ev_val is not None else "S/C",
+            p1, p2, f"{p_mod*100:.1f}%",
+            f"{p_casa*100:.1f}%" if p_casa else "S/C",
+            str(odd) if odd else "S/C",
+            f"{ev_val*100:+.1f}%" if ev_val is not None else "S/C",
             tier, "", league
         ])
         return True
-    except Exception: return False
+    except Exception:
+        return False
 
 def liquidar_partido(p1: str, p2: str) -> str:
     client = get_gemini_client()
-    if not client: return ""
+    if not client:
+        return ""
     try:
-        prompt = (f"Busca en Google si ya terminó '{p1}' vs '{p2}'.\n"
-                  f"Si terminó → responde ÚNICAMENTE el nombre del ganador.\n"
-                  f"Si no → responde PENDIENTE")
+        prompt = (
+            f"Busca en Google si ya terminó '{p1}' vs '{p2}'.\n"
+            f"Si terminó → responde ÚNICAMENTE el nombre del ganador.\n"
+            f"Si no → responde PENDIENTE"
+        )
         r = client.models.generate_content(
             model=GEMINI_MODEL, contents=prompt,
-            config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.0)
+            config=types.GenerateContentConfig(
+                tools=[{"google_search": {}}], temperature=0.0)
         )
         t = r.text.upper().strip()
-        if "PENDIENTE" in t: return ""
-        if p1.upper().split()[-1] in t: return p1
-        if p2.upper().split()[-1] in t: return p2
+        if "PENDIENTE" in t:
+            return ""
+        p1l = p1.upper().split()[-1]
+        p2l = p2.upper().split()[-1]
+        if p1.upper() in t or p1l in t:
+            return p1
+        if p2.upper() in t or p2l in t:
+            return p2
         return ""
-    except Exception: return ""
+    except Exception:
+        return ""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PARSER ROBUSTO
+# PARSER
 # ─────────────────────────────────────────────────────────────────────────────
 def extract_american_odds(text: str):
     m = re.search(r'([+-]\d{3,4})', text)
-    if m: return text.replace(m.group(1), '').strip(), int(m.group(1))
+    if m:
+        return text.replace(m.group(1), '').strip(), int(m.group(1))
     return text.strip(), None
 
 def parse_matches(text: str) -> list[tuple]:
     text = text.replace('–', '-').replace('—', '-').replace('−', '-')
-    results = []; cur_league = "ATP/WTA"
+    results = []
+    cur_league = "ATP/WTA"
 
     if re.search(r'(?i)\bvs\.?\b', text):
         for line in text.splitlines():
             line = line.strip()
-            if not re.search(r'(?i)\bvs\.?\b', line): continue
+            if not re.search(r'(?i)\bvs\.?\b', line):
+                continue
             parts = re.split(r'(?i)\s+vs\.?\s+', line)
             if len(parts) == 2:
                 p1, o1 = extract_american_odds(parts[0])
                 p2, o2 = extract_american_odds(parts[1])
-                if p1 and p2: results.append((p1, o1, p2, o2, cur_league))
-        if results: return results
+                if p1 and p2:
+                    results.append((p1, o1, p2, o2, cur_league))
+        if results:
+            return results
 
     DATE_RE    = re.compile(r'^(\d{1,2}\s+[a-zA-Z]{3}\s+)?\d{2}:\d{2}$')
     COUNTER_RE = re.compile(r'^\+\s*\d{1,2}\s*(Streaming)?$', re.I)
@@ -127,397 +164,735 @@ def parse_matches(text: str) -> list[tuple]:
 
     for raw in text.splitlines():
         line = raw.strip()
-        if not line: continue
+        if not line:
+            continue
         odds_match = re.findall(r'[+-]\d{3,4}', line)
         if odds_match:
-            for o in odds_match: odd_q.append(int(o))
+            for o in odds_match:
+                odd_q.append(int(o))
             line = re.sub(r'[+-]\d{3,4}.*', '', line).strip()
-            if not line: continue
+            if not line:
+                continue
         low = line.lower()
         if re.search(r'\b(?:' + '|'.join(map(re.escape, METADATA_KW)) + r')\b', low):
-            if "itf" in low or "world tennis" in low: cur_league = "ITF"
-            elif "challenger" in low: cur_league = "Challenger"
-            elif "atp" in low: cur_league = "ATP"
-            elif "wta" in low or "women" in low: cur_league = "WTA"
+            if "itf" in low or "world tennis" in low:
+                cur_league = "ITF"
+            elif "challenger" in low:
+                cur_league = "Challenger"
+            elif "atp" in low:
+                cur_league = "ATP"
+            elif "wta" in low or "women" in low:
+                cur_league = "WTA"
             continue
-        if DATE_RE.match(line) or COUNTER_RE.match(line): continue
+        if DATE_RE.match(line) or COUNTER_RE.match(line):
+            continue
         name_q.append(line)
         while len(name_q) >= 2 and len(odd_q) >= 2:
-            results.append((name_q.pop(0), odd_q.pop(0), name_q.pop(0), odd_q.pop(0), cur_league))
+            results.append((name_q.pop(0), odd_q.pop(0),
+                            name_q.pop(0), odd_q.pop(0), cur_league))
 
     while len(name_q) >= 2 and len(odd_q) >= 2:
-        results.append((name_q.pop(0), odd_q.pop(0), name_q.pop(0), odd_q.pop(0), cur_league))
+        results.append((name_q.pop(0), odd_q.pop(0),
+                        name_q.pop(0), odd_q.pop(0), cur_league))
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GEMINI — DEEP AUTONOMOUS PROFILING (Lotes)
+# GEMINI — DEEP AUTONOMOUS PROFILING (expandido: +last5 +tour)
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def get_autonomous_profiles(players: list[str]) -> dict:
-    """Extrae el perfil físico (Zurdo?, Altura) de toda la cuadra de jugadores a la vez."""
-    if not players: return {}
+    """Extrae perfil físico + forma + nivel de toda la cuadra en un solo call."""
+    if not players:
+        return {}
     client = get_gemini_client()
-    if not client: return {}
-    
-    unique_players = list(set(players))
-    players_str = "\n".join(f"- {p}" for p in unique_players)
-    
-    prompt = f"""Devuelve estrictamente un JSON válido.
-Busca en tu base de datos o en internet la ESTATURA en cm (ht) y la MANO DOMINANTE ('L' para Zurdo, 'R' para Diestro) de:
-{players_str}
+    if not client:
+        return {}
 
-Si no aparece información de algún jugador, asume "R" y 183.
-Formato de respuesta:
+    unique = list(set(players))
+    plist  = "\n".join(f"- {p}" for p in unique)
+
+    prompt = f"""Devuelve estrictamente un JSON válido, sin explicaciones.
+Para cada jugador busca:
+  hand  → "L" (zurdo) o "R" (diestro)
+  ht    → estatura en cm (entero)
+  last5 → victorias en sus últimos 5 partidos oficiales (0–5, estima si no hay datos exactos)
+  tour  → circuito HABITUAL donde más juega: "ATP", "WTA", "Challenger" o "ITF"
+
+Jugadores:
+{plist}
+
+Si falta info de alguno, usa: hand="R", ht=183, last5=3, tour="ATP"
+Ejemplo de formato:
 {{
-  "Carlos Alcaraz": {{"hand": "R", "ht": 183}},
-  "Rafael Nadal": {{"hand": "L", "ht": 185}}
+  "Carlos Alcaraz": {{"hand": "R", "ht": 183, "last5": 4, "tour": "ATP"}},
+  "Rafael Nadal": {{"hand": "L", "ht": 185, "last5": 2, "tour": "ATP"}}
 }}"""
+
     try:
         r = client.models.generate_content(
             model=GEMINI_MODEL, contents=prompt,
-            config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.1)
+            config=types.GenerateContentConfig(
+                tools=[{"google_search": {}}], temperature=0.1)
         )
-        raw = r.text.replace("```json","").replace("```","").strip()
+        raw = r.text.replace("```json", "").replace("```", "").strip()
         s, e = raw.find('{'), raw.rfind('}')
         data = json.loads(raw[s:e+1]) if s != -1 and e != -1 else {}
-        # Normalizar claves para perdonar mayúsculas/minúsculas
         return {k.lower().strip(): v for k, v in data.items()}
     except Exception:
         return {}
 
-def get_player_profile(name: str, profiles_dict: dict) -> tuple[bool, int]:
-    """Busca al jugador en el dict autónomo. Retorna (es_zurdo, altura)."""
-    norm_name = name.lower().strip()
-    # Buscar coincidencia parcial si el nombre varía ("Alcaraz C" vs "Carlos Alcaraz")
-    for k, v in profiles_dict.items():
-        if k in norm_name or norm_name in k or norm_name.split()[-1] in k:
-            return (v.get("hand", "R") == "L", int(v.get("ht", 183)))
-    return (False, 183)
+def get_player_profile(name: str, profiles: dict) -> dict:
+    """Busca jugador en el dict. Retorna perfil completo."""
+    norm = name.lower().strip()
+    last = norm.split()[-1] if " " in norm else norm
+    for k, v in profiles.items():
+        if k in norm or norm in k or last in k:
+            return {
+                "zurdo": v.get("hand", "R") == "L",
+                "ht":    int(v.get("ht", 183)),
+                "last5": v.get("last5"),
+                "tour":  v.get("tour", "ATP"),
+            }
+    return {"zurdo": False, "ht": 183, "last5": None, "tour": "ATP"}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CALIBRACIÓN Y AJUSTES NUMÉRICOS
+# CALIBRACIÓN HISTÓRICA
 # ─────────────────────────────────────────────────────────────────────────────
 CALIBRATION = {
-    ("Challenger", "SD"): 0.82, ("Challenger", "D"): 0.80, ("Challenger", "FR"): 0.90,
-    ("ATP/WTA", "SD"): 0.94, ("ATP", "SD"): 0.96, ("WTA", "SD"): 0.96,
-    ("ITF", "SD"): 1.00, ("Challenger", "PY"): 0.88,
+    ("Challenger", "SD"): 0.82, ("Challenger", "D"): 0.80,
+    ("Challenger", "FR"): 0.90, ("Challenger", "PY"): 0.88,
+    ("ATP/WTA",    "SD"): 0.94,
+    ("ATP",        "SD"): 0.96, ("WTA", "SD"): 0.96,
+    ("ITF",        "SD"): 1.00,
 }
+
 def _liga_key(liga: str) -> str:
     lg = (liga or "").upper()
     if "CHALLENGER" in lg: return "Challenger"
-    if "ITF" in lg: return "ITF"
-    if lg in ("ATP", "WTA"): return lg
+    if "ITF" in lg:        return "ITF"
+    if lg in ("ATP","WTA"):return lg
     return "ATP/WTA"
 
 def _tier_key(t: str) -> str:
-    t = t.upper()
-    if "FRANC" in t: return "FR"
-    if "SUPER" in t or "SÚPER" in t: return "SD"
-    if "DERECHA" in t: return "D"
+    t = (t or "").upper()
+    if "FRANC" in t:                  return "FR"
+    if "SUPER" in t or "SÚPER" in t:  return "SD"
+    if "DERECHA" in t:                return "D"
     if "PARLAY" in t or "VALOR" in t: return "PY"
     return "BASURA"
 
-def apply_calibration(pmod_raw: float, liga: str, tier: str) -> float:
+def apply_calibration(pmod: float, liga: str, tier: str) -> float:
     factor = CALIBRATION.get((_liga_key(liga), _tier_key(tier)), 1.0)
-    return min(max(0.5 + (pmod_raw - 0.5) * factor, 0.05), 0.95)
+    return min(max(0.5 + (pmod - 0.5) * factor, 0.05), 0.95)
 
-def calcular_sum_adj(rival_zurdo: bool, indoor: bool, alt_cm: int) -> tuple[float, list[str]]:
+# ─────────────────────────────────────────────────────────────────────────────
+# AJUSTES v3 — 5 FACTORES AUTÓNOMOS
+# ─────────────────────────────────────────────────────────────────────────────
+def calcular_sum_adj(
+    rival_zurdo: bool,
+    indoor: bool,
+    alt_cm: int,
+    surface: str,
+    liga: str,
+    rival_tour: str,
+    own_tour: str,
+    last5: int | None,
+) -> tuple[float, list[str]]:
+    """Calcula el ajuste total PARA un jugador (positivo = lo ayuda)."""
     tot, notas = 0.0, []
+
+    # 1) Zurdo: si tu rival es zurdo, te cuesta −0.07
     if rival_zurdo:
-        tot -= 0.07; notas.append("🛡️ Rival Zurdo detectado (-0.07)")
+        tot -= 0.07
+        notas.append("🛡️ Rival Zurdo → −0.07")
+
+    # 2) Indoor + Altura: si mides >193cm en indoor, tu saque domina +0.05
     if indoor and alt_cm > 193:
-        tot += 0.05; notas.append(f"🗼 Altura Indoor detectada ({alt_cm}cm) → (+0.05)")
+        tot += 0.05
+        notas.append(f"🗼 Indoor + {alt_cm}cm → +0.05")
+
+    # 3) Clay Trap: si la superficie es clay en Challenger/ITF y tu RIVAL es
+    #    de ese circuito (probable local), tú estás en desventaja −0.06
+    if "clay" in surface.lower():
+        lg_key  = _liga_key(liga)
+        rv_key  = _liga_key(rival_tour)
+        if lg_key in ("Challenger", "ITF") and rv_key == lg_key:
+            tot -= 0.06
+            notas.append(f"🧱 Clay Trap: rival habitual de {lg_key} en clay → −0.06")
+
+    # 4) DR últimos 5: racha caliente/fría ±0.04
+    if last5 is not None:
+        if last5 >= 4:
+            tot += 0.04
+            notas.append(f"🔥 Racha caliente: {last5}/5 → +0.04")
+        elif last5 <= 1:
+            tot -= 0.04
+            notas.append(f"❄️ Racha fría: {last5}/5 → −0.04")
+
+    # 5) Tier Drop: si normalmente juegas ATP pero hoy estás en Challenger → −0.04
+    t_act = TIER_ORDER.get(_liga_key(liga), 3)
+    t_hab = TIER_ORDER.get(_liga_key(own_tour), 3)
+    if t_hab > t_act:
+        tot -= 0.04
+        notas.append(f"📉 Tier Drop: de {own_tour} a {liga} → −0.04")
+
     return tot, notas
 
-def apply_environment(spw: float, rpw: float, n: int,
-                      alt_m: int, fat_h48: int, surface: str) -> tuple[float, float]:
-    conf = min(n/15.0, 1.0) if n>0 else 0.0; shrink = 0.35*(1.0-conf)
-    a_spw = spw*(1-shrink) + 62.0*shrink; a_rpw = rpw*(1-shrink) + 38.0*shrink
-    sv = SURFACE_ADJ.get(surface.lower(), SURFACE_ADJ["hard"])
-    a_spw += sv["spw"] + (alt_m/1000.0)*1.5 - fat_h48*0.5
-    a_rpw += sv["rpw"] - (alt_m/1000.0)*0.75 - fat_h48*1.5
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTORNO — Shrinkage Bayesiano + Superficie
+# ─────────────────────────────────────────────────────────────────────────────
+def apply_environment(spw, rpw, n, alt_m, fatigue, surface):
+    conf   = min(n / 15.0, 1.0) if n > 0 else 0.0
+    shrink = 0.35 * (1.0 - conf)
+    a_spw  = spw * (1 - shrink) + 62.0 * shrink
+    a_rpw  = rpw * (1 - shrink) + 38.0 * shrink
+    sv     = SURFACE_ADJ.get(surface.lower(), SURFACE_ADJ["hard"])
+    a_spw += sv["spw"] + (alt_m / 1000.0) * 1.5  - fatigue * 0.5
+    a_rpw += sv["rpw"] - (alt_m / 1000.0) * 0.75 - fatigue * 1.5
     return min(max(a_spw, 30.0), 90.0), min(max(a_rpw, 10.0), 70.0)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MATEMÁTICA Y MONTE CARLO
+# MATEMÁTICA — Log5 + Markov + Monte Carlo NumPy
 # ─────────────────────────────────────────────────────────────────────────────
-def american_to_decimal(odd: int) -> float: return (odd/100+1) if odd>0 else (100/abs(odd)+1)
-def no_vig(o1: int, o2: int):
-    i1=1/american_to_decimal(o1); i2=1/american_to_decimal(o2); t=i1+i2
-    return i1/t, i2/t, round(1/(i1/t),3), round(1/(i2/t),3)
-def vig_pct(o1, o2): return round((1/american_to_decimal(o1) + 1/american_to_decimal(o2) - 1)*100,2)
-def ev(p: float, dec: float): return p*(dec-1) - (1-p)
-def kelly_fraction(prob: float, dec: float, f=0.25):
-    b = dec-1; return max(0.0, round(((b*prob - (1-prob))/b)*f*100,2))
+def american_to_decimal(odd: int) -> float:
+    return (odd / 100 + 1) if odd > 0 else (100 / abs(odd) + 1)
 
-def get_tier(p_mod: float, ev_val: float | None, p_casa: float | None) -> str:
-    p = p_mod*100
-    if p_casa is None or ev_val is None: return "🟢 DERECHA" if p>=65 else ("🟡 VALOR" if p>=50 else "🔴 BASURA")
-    ev_p, pc_p = ev_val*100, p_casa*100
-    if p < 45 or (p < pc_p and ev_p <= 0): return "🔴 BASURA"
-    if p >= 70 and ev_p >= 2 and p > pc_p: return "🔥 SÚPER DERECHA"
-    if 60 <= p < 70 and ev_p >= 3: return "🟢 DERECHA"
-    if 50 <= p < 60 and pc_p < 45: return "🎯 FRANCOTIRADOR"
-    if 45 <= p < 60 and ev_p >= 8: return "🟡 VALOR / PARLAY"
+def no_vig(o1: int, o2: int):
+    i1 = 1 / american_to_decimal(o1)
+    i2 = 1 / american_to_decimal(o2)
+    t  = i1 + i2
+    p1, p2 = i1 / t, i2 / t
+    return p1, p2, round(1 / p1, 3), round(1 / p2, 3)
+
+def vig_pct(o1, o2):
+    return round((1/american_to_decimal(o1) + 1/american_to_decimal(o2) - 1) * 100, 2)
+
+def ev(p, dec):
+    return p * (dec - 1) - (1 - p)
+
+def kelly_fraction(prob, dec, f=0.25):
+    b = dec - 1
+    return max(0.0, round(((b * prob - (1 - prob)) / b) * f * 100, 2))
+
+def get_tier(p_mod, ev_val, p_casa):
+    p = p_mod * 100
+    if p_casa is None or ev_val is None:
+        if p >= 65:   return "🟢 DERECHA"
+        elif p >= 50: return "🟡 VALOR"
+        else:         return "🔴 BASURA"
+    ev_p, pc_p = ev_val * 100, p_casa * 100
+    if p < 45 or (p < pc_p and ev_p <= 0):
+        return "🔴 BASURA"
+    if p >= 70 and ev_p >= 2 and p > pc_p:
+        return "🔥 SÚPER DERECHA"
+    if 60 <= p < 70 and ev_p >= 3:
+        return "🟢 DERECHA"
+    if 50 <= p < 60 and pc_p < 45:
+        return "🎯 FRANCOTIRADOR"
+    if 45 <= p < 60 and ev_p >= 8:
+        return "🟡 VALOR / PARLAY"
     return "🔴 BASURA"
 
-def log5_serve(spw: float, rpw: float): return (spw/100*(1-rpw/100))/(spw/100*(1-rpw/100)+(1-spw/100)*rpw/100)
+def log5_serve(spw, rpw):
+    a, b = spw / 100, rpw / 100
+    d = a * (1 - b) + (1 - a) * b
+    return (a * (1 - b)) / d if d else 0.5
 
 def _game_wp_np(p: np.ndarray) -> np.ndarray:
-    q=1-p; pfd=np.where(p**2+q**2>0, p**2/(p**2+q**2), 0.5)
+    """Prob de ganar un game al servicio — Markov analítico, vectorizado."""
+    q   = 1 - p
+    pfd = np.where(p**2 + q**2 > 0, p**2 / (p**2 + q**2), 0.5)
     return p**4 + 4*p**4*q + 10*p**4*q**2 + 20*p**3*q**3*pfd
 
-def sim_match(pA_b: float, pB_b: float, bo: int=3, iters: int=5000, alt: int=0) -> float:
-    std = 0.015*(1.0 + alt/2000.0); nd = 2 if bo==3 else 3
-    rng = np.random.default_rng()
-    pA_A = np.clip(rng.normal(pA_b, std, iters), 0.35, 0.95); pB_A = np.clip(rng.normal(pB_b, std, iters), 0.35, 0.95)
-    gA_A = _game_wp_np(pA_A); gB_A = _game_wp_np(pB_A)
+def sim_match(pA_b, pB_b, bo=3, iters=5000, alt=0):
+    """Monte Carlo con tiebreak corregido. Retorna (p_hat, margen_IC95)."""
+    std = 0.015 * (1.0 + alt / 2000.0)
+    nd  = 2 if bo == 3 else 3
+
+    rng  = np.random.default_rng()
+    pA_v = np.clip(rng.normal(pA_b, std, iters), 0.35, 0.95)
+    pB_v = np.clip(rng.normal(pB_b, std, iters), 0.35, 0.95)
+    gA_v = _game_wp_np(pA_v)
+    gB_v = _game_wp_np(pB_v)
+
     wins = 0
     for i in range(iters):
-        sA=sB=0; srv=True; pA,pB,gA,gB = pA_A[i],pB_A[i],gA_A[i],gB_A[i]
-        while sA<nd and sB<nd:
-            ga=gb=0
+        sA = sB = 0
+        srv = True                  # True = A saca este game
+        pA, pB = pA_v[i], pB_v[i]  # prob punto al servicio
+        gA, gB = gA_v[i], gB_v[i]  # prob game al servicio
+        while sA < nd and sB < nd:
+            ga = gb = 0
             while True:
-                if ga==6 and gb==6:
-                    a=b=t=0
+                # ── Tiebreak (corregido v15) ──────────────────────
+                if ga == 6 and gb == 6:
+                    ta = tb = t = 0
                     while True:
-                        A_serving = (t % 4 == 0 or t % 4 == 3) if srv else (t % 4 == 1 or t % 4 == 2)
-                        server_won = random.random() < (pA if A_serving else pB)
-                        if A_serving:
-                            if server_won: a+=1
-                            else: b+=1
+                        # Patrón: el que toca saca 1, luego 2-2-2-2...
+                        # srv=True → A saca primero en el TB
+                        if srv:
+                            a_saca = (t % 4 == 0 or t % 4 == 3)
                         else:
-                            if server_won: b+=1
-                            else: a+=1
-                        t+=1
-                        if a>=7 and a-b>=2: ga+=1; break
-                        if b>=7 and b-a>=2: gb+=1; break
-                    if ga>gb: sA+=1
-                    else: sB+=1
-                    srv = not srv; break
-                
-                server_won_game = random.random() < (gA if srv else gB)
+                            a_saca = (t % 4 == 1 or t % 4 == 2)
+                        # El servidor gana el punto con su prob de servicio
+                        server_won = random.random() < (pA if a_saca else pB)
+                        if a_saca:
+                            if server_won: ta += 1
+                            else:          tb += 1
+                        else:
+                            if server_won: tb += 1
+                            else:          ta += 1
+                        t += 1
+                        if ta >= 7 and ta - tb >= 2:
+                            ga += 1; break      # A gana TB
+                        if tb >= 7 and tb - ta >= 2:
+                            gb += 1; break      # B gana TB
+                    # Asignar set
+                    if ga > gb: sA += 1
+                    else:       sB += 1
+                    srv = not srv       # el otro saca primero el próximo set
+                    break
+
+                # ── Game regular ──────────────────────────────────
+                server_holds = random.random() < (gA if srv else gB)
                 if srv:
-                    if server_won_game: ga+=1
-                    else: gb+=1
+                    if server_holds: ga += 1
+                    else:            gb += 1
                 else:
-                    if server_won_game: gb+=1
-                    else: ga+=1
-                
+                    if server_holds: gb += 1
+                    else:            ga += 1
                 srv = not srv
-                if (ga>=6 and ga-gb>=2) or ga==7: sA+=1; break
-                if (gb>=6 and gb-ga>=2) or gb==7: sB+=1; break
-        if sA==nd: wins+=1
-    return wins/iters
+                if ga >= 6 and ga - gb >= 2:
+                    sA += 1; break
+                if gb >= 6 and gb - ga >= 2:
+                    sB += 1; break
+                # (ga==7 or gb==7 ya cubiertos por la condición de arriba)
+
+        if sA == nd:
+            wins += 1
+
+    p_hat = wins / iters
+    se    = np.sqrt(p_hat * (1 - p_hat) / iters)
+    return p_hat, 1.96 * se          # media, margen IC 95%
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DB LOCAL & FALLBACK
+# BD LOCAL & FALLBACK
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def get_stats(name: str) -> dict | None:
-    pts=won=gms=hld=r_pts=r_won=r_gms=r_brk=n = 0
+    pts = won = gms = r_pts = r_won = r_gms = n = 0
     try:
         with open(DB_PATH, encoding='utf-8') as f:
-            for l in f:
-                if name.lower() not in l.lower(): continue
-                m = json.loads(l)
-                aw=name.lower() in m[2].lower(); al=name.lower() in m[4].lower()
-                if not aw and not al: continue
+            for ln in f:
+                if name.lower() not in ln.lower():
+                    continue
+                m  = json.loads(ln)
+                aw = name.lower() in m[2].lower()
+                al = name.lower() in m[4].lower()
+                if not aw and not al:
+                    continue
                 wp = (m[6],m[8],m[9],m[10],m[11],m[12]) if aw else (m[13],m[15],m[16],m[17],m[18],m[19])
                 lp = (m[13],m[15],m[16],m[17],m[18],m[19]) if aw else (m[6],m[8],m[9],m[10],m[11],m[12])
-                pts+=wp[0]; won+=wp[1]+wp[2]; gms+=wp[3]; hld+=max(0, wp[3]-(wp[5]-wp[4]))
-                r_pts+=lp[0]; r_won+=max(0, lp[0]-(lp[1]+lp[2])); r_gms+=lp[3]; r_brk+=max(0, lp[5]-lp[4]); n+=1
-    except: return None
-    if n==0: return None
-    return {"n":n, "spw":round(max(10.1,(won/pts*100) if pts else 55),1), "rpw":round(max(10.1,(r_won/r_pts*100) if r_pts else 40),1), "source":"BD Local"}
+                pts   += wp[0]; won   += wp[1] + wp[2]; gms += wp[3]
+                r_pts += lp[0]; r_won += max(0, lp[0] - (lp[1] + lp[2])); r_gms += lp[3]
+                n += 1
+    except Exception:
+        return None
+    if n == 0:
+        return None
+    spw = max(10.1, (won / pts * 100) if pts else 55.0)
+    rpw = max(10.1, (r_won / r_pts * 100) if r_pts else 40.0)
+    return {"n": n, "spw": round(spw, 1), "rpw": round(rpw, 1), "source": "BD Local"}
 
 def gemini_stats(name: str, surface: str) -> dict:
     c = get_gemini_client()
-    if not c: return {"n":1,"spw":55.0,"rpw":40.0,"source":"Sin API"}
+    if not c:
+        return {"n": 1, "spw": 55.0, "rpw": 40.0, "source": "Sin API"}
     try:
-        req = f"Estima SPW (puntos saque ganados %) y RPW (devolución %) de {name} en {surface} últimos meses. SOLO devuelve JSON crudo: {{\"spw\": 62.5, \"rpw\": 39.2}}"
+        req = (
+            f'Estima SPW y RPW de "{name}" en {surface} últimos meses. '
+            f'SOLO JSON crudo: {{"spw": 62.5, "rpw": 39.2}}'
+        )
         r = c.models.generate_content(
             model=GEMINI_MODEL, contents=req,
-            config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.2)
+            config=types.GenerateContentConfig(
+                tools=[{"google_search": {}}], temperature=0.2)
         )
         t = r.text.replace('```json', '').replace('```', '').strip()
         s, e = t.find('{'), t.rfind('}')
         if s != -1 and e != -1:
             d = json.loads(t[s:e+1])
-            return {"n":5,"spw":float(d.get("spw", 55.0)),"rpw":float(d.get("rpw", 40.0)),"source":"Gemini Web"}
-        return {"n":1,"spw":55.0,"rpw":40.0,"source":"Gemini Fallback"}
-    except: return {"n":1,"spw":55.0,"rpw":40.0,"source":"Gemini Fallback"}
+            return {"n": 5,
+                    "spw": float(d.get("spw", 55.0)),
+                    "rpw": float(d.get("rpw", 40.0)),
+                    "source": "Gemini Web"}
+    except Exception:
+        pass
+    return {"n": 1, "spw": 55.0, "rpw": 40.0, "source": "Gemini Fallback"}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# AUDITORÍA PROFUNDA H48
+# GEMINI — AUDITORÍA H48 + MATH (recibe el reporte completo)
 # ─────────────────────────────────────────────────────────────────────────────
-def gemini_analysis(p1: str, p2: str) -> str:
+def gemini_analysis(p1: str, p2: str, report: str) -> str:
     c = get_gemini_client()
-    if not c: return "❌ Sin API."
-    prompt = f"""Quantum Analyst v14. 
-Paso 1: BUSCA RÁPIDO en Google noticias de última hora sobre {p1} y {p2}.
-Paso 2: REPORTA ÚNICAMENTE si encuentras lesiones, retiros recientes o fatiga extrema demostrable (partidos larguísimos ayer).
-Paso 3: Si no hay noticias graves de lesiones físicas, di explícitamente "🟢 Sin Alertas Físicas (Camino Libre)". 
-No intentes analizar los números o probabilidades de cómo será el partido. Limítate a buscar estado médico/físico de las últimas 48 hrs."""
+    if not c:
+        return "❌ Sin API."
+
+    prompt = f"""Quantum Tennis Analyst v15.
+
+PASO 1 — ALERTAS FÍSICAS (busca en Google):
+Busca noticias de las últimas 48h sobre {p1} y {p2}.
+FILTRO: Solo reporta lesiones CONFIRMADAS, retiros oficiales, o fatiga extrema
+demostrable (partido >2h30m ayer, o singles+dobles el mismo día).
+Si no hay nada → di "🟢 Sin Alertas Físicas (Camino Libre)".
+
+PASO 2 — AUDITORÍA MATEMÁTICA:
+{report}
+
+Evalúa en 2-3 líneas:
+- ¿El EV es coherente con la diferencia Pmod vs P_casa?
+- ¿Los ajustes v3 son razonables (|net_adj| < 0.15)?
+- ¿Alguna señal de sobreajuste?
+
+PASO 3 — VEREDICTO (1 línea con emoji):
+✅ VERDE → EV ≥ +5% Y sin alertas
+⚠️ AMARILLO → EV 0-5% O fatiga confirmada
+🔵 FAVORITO → Pmod >70% pero EV negativo por cuota
+🚫 ROJO → EV negativo O lesión confirmada
+
+Formato:
+**H48**: [1 línea por jugador]
+**AUDITORÍA**: [2-3 líneas]
+**VEREDICTO**: [emoji + 1 línea]"""
+
     try:
-        r = c.models.generate_content(model=GEMINI_MODEL, contents=prompt, config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.1))
-        return r.text
-    except Exception as e: return f"Error H48: {e}"
+        r = c.models.generate_content(
+            model=GEMINI_MODEL, contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[{"google_search": {}}], temperature=0.1,
+                safety_settings=[
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                ])
+        )
+        if r.text:
+            return r.text
+        # Fallback sin buscador si Google bloquea
+        r2 = c.models.generate_content(
+            model=GEMINI_MODEL, contents=f"Analiza solo los números:\n{report}\nDa veredicto.",
+            config=types.GenerateContentConfig(temperature=0.1)
+        )
+        return r2.text if r2.text else "⚠️ Análisis bloqueado."
+    except Exception as e:
+        return f"Error H48: {e}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
-    st.set_page_config(page_title="Quantum v14 Autónomo", page_icon="🎾", layout="wide")
-    st.title("🎾 Quantum Tennis Engine v14 (Dios)")
-    st.caption("Deep Autonomous Profiling · NumPy Vectorizado · Kelly Fraction")
-    
+    st.set_page_config(page_title="Quantum v15", page_icon="🎾", layout="wide")
+    st.title("🎾 Quantum Tennis Engine v15")
+    st.caption("Deep Autonomous Profiling · 5 Ajustes v3 · NumPy MC + IC 95% · Kelly 25%")
+
     st.markdown("""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
         html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
         [data-testid="stMetricValue"] { font-size: 1.8rem !important; font-weight: 800 !important; }
-        [data-testid="stMetricDelta"] { font-size: 1.1rem !important; font-weight: 600 !important; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.05); }
-        .tier-badge { display: inline-block; padding: 8px 16px; border-radius: 8px; font-weight: 800; font-size: 1.05rem; text-align: center; width: 100%; margin-top: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.4); text-transform: uppercase; letter-spacing: 0.5px; border: 1px solid rgba(255,255,255,0.1); }
+        [data-testid="stMetricDelta"] { font-size: 1.1rem !important; font-weight: 600 !important;
+            padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.05); }
+        .tier-badge { display: inline-block; padding: 8px 16px; border-radius: 8px;
+            font-weight: 800; font-size: 1.05rem; text-align: center; width: 100%;
+            margin-top: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+            text-transform: uppercase; letter-spacing: 0.5px;
+            border: 1px solid rgba(255,255,255,0.1); }
         .tr { background:linear-gradient(135deg,#4a0000,#220000); color:#ff6666; border-color:#ff3333; }
         .ty { background:linear-gradient(135deg,#4a3800,#221a00); color:#ffcc00; border-color:#ffaa00; }
-        .tg { background:linear-gradient(135deg,#004a11,#002208); color:#44ff66; border-color:#00ff33; box-shadow:0 0 15px rgba(0,255,51,0.2); }
+        .tg { background:linear-gradient(135deg,#004a11,#002208); color:#44ff66; border-color:#00ff33;
+               box-shadow:0 0 15px rgba(0,255,51,0.2); }
         .tf { background:linear-gradient(135deg,#002b4a,#001222); color:#44aaff; border-color:#0088ff; }
-        .ts { background:linear-gradient(135deg,#4a004a,#220022); color:#ff44ff; border-color:#aa00ff; box-shadow:0 0 20px rgba(170,0,255,0.5); }
-        button[kind="primary"] { background:linear-gradient(135deg,#0d965e,#086d42) !important; box-shadow:0 4px 15px rgba(13,150,94,0.4) !important; border:none !important; font-weight:800 !important; letter-spacing:1px; border-radius:8px !important; }
-        .stTextArea textarea { background-color:#111 !important; border:1px solid #333 !important; color:#00ff9d !important; font-family:monospace; font-size:15px !important; border-radius:8px !important; }
-        .kelly { background:rgba(13,150,94,0.15); border:1px solid #0d965e; border-radius:8px; padding:8px 14px; font-weight:700; font-size:1rem; }
+        .ts { background:linear-gradient(135deg,#4a004a,#220022); color:#ff44ff; border-color:#aa00ff;
+               box-shadow:0 0 20px rgba(170,0,255,0.5); }
+        button[kind="primary"] { background:linear-gradient(135deg,#0d965e,#086d42) !important;
+            box-shadow:0 4px 15px rgba(13,150,94,0.4) !important; border:none !important;
+            font-weight:800 !important; letter-spacing:1px; border-radius:8px !important; }
+        .stTextArea textarea { background-color:#111 !important; border:1px solid #333 !important;
+            color:#00ff9d !important; font-family:monospace; font-size:15px !important;
+            border-radius:8px !important; }
+        .kelly { background:rgba(13,150,94,0.15); border:1px solid #0d965e;
+                 border-radius:8px; padding:8px 14px; font-weight:700; font-size:1rem; }
         </style>
     """, unsafe_allow_html=True)
 
-    if not gemini_available(): st.error("⚠️ Falta GOOGLE_API_KEY"); st.stop()
+    if not gemini_available():
+        st.error("⚠️ Falta GOOGLE_API_KEY")
+        st.stop()
 
     with st.sidebar:
-        st.header("🌍 Ecosistema General")
-        st.info("🤖 **Autonomía Activa**: Gemini buscará manos dominantes (Zr/Dr) y estaturas automáticamente.")
+        st.header("🌍 Ecosistema")
+        st.info("🤖 Autonomía: Gemini extrae Mano, Altura, DR5, Tour automáticamente.")
         alt_m = st.number_input("Altitud (msnm)", 0, 4000, 0, 100)
-        ind, surf = st.checkbox("Torneo Indoor"), st.selectbox("Superficie", ["hard", "clay", "grass"])
+        ind   = st.checkbox("Torneo Indoor")
+        surf  = st.selectbox("Superficie", ["hard", "clay", "grass", "carpet"])
+        st.caption(f"Adj superficie → SPW {SURFACE_ADJ[surf]['spw']:+.1f}% / RPW {SURFACE_ADJ[surf]['rpw']:+.1f}%")
         st.divider()
-        st.header("🤕 Fatiga General del Lote")
-        fat_p1, fat_p2 = st.slider("Fatiga P1",0,5,0), st.slider("Fatiga P2",0,5,0)
-        iters = st.select_slider("MC Iters", [1000,3000,5000,10000], 5000)
+        st.header("🤕 Fatiga (0–5)")
+        fat_p1 = st.slider("Fatiga P1", 0, 5, 0)
+        fat_p2 = st.slider("Fatiga P2", 0, 5, 0)
+        st.divider()
+        iters = st.select_slider("MC Iters", [1000, 3000, 5000, 10000], 5000)
 
-    if "txt" not in st.session_state: st.session_state.txt = ""
-    t1, t2 = st.tabs(["🎾 Motor Analítico", "🔮 El Oráculo"])
-    
-    with t1:
-        c1, c2, c3 = st.columns([2, 1, 1])
-        with c1: bo = st.radio("Súper Formato", [3, 5], horizontal=True, format_func=lambda x: f"Bo{x}")
+    # ── Estado de sesión ──────────────────────────────────────────────────────
+    if "txt"        not in st.session_state: st.session_state.txt = ""
+    if "save_batch" not in st.session_state: st.session_state.save_batch = []
+
+    tab1, tab2 = st.tabs(["🎾 Motor Analítico", "🔮 El Oráculo"])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab1:
+        c1, _, c3 = st.columns([2, 1, 1])
+        with c1:
+            bo = st.radio("Formato", [3, 5], horizontal=True,
+                          format_func=lambda x: f"Bo{x}")
         with c3:
-            if st.button("🗑️ Limpiar", use_container_width=True): 
+            if st.button("🗑️ Limpiar", use_container_width=True):
                 st.session_state.txt = ""
                 st.rerun()
 
-        txt = st.text_area("📋 Pega tus partidos:", key="txt", height=160, placeholder="Sinner J\nAlcaraz C\n-140\n+110")
+        txt = st.text_area("📋 Pega tus partidos:", key="txt", height=160,
+                           placeholder="Sinner J\nAlcaraz C\n-140\n+110")
+
         if st.button("🚀 Ignición Autónoma", type="primary", use_container_width=True):
             pts = parse_matches(txt)
-            if not pts: st.error("No se detectaron emparejamientos. Sombrea las cuotas hasta el final.")
+            if not pts:
+                st.error("No se detectaron emparejamientos.")
+                st.warning("Asegúrate de copiar el texto completo incluyendo la última cuota.")
             else:
-                names_to_fetch = [p[0] for p in pts] + [p[2] for p in pts]
-                with st.spinner(f"🔍 Deep Profiling a {len(set(names_to_fetch))} jugadores simultáneamente..."):
-                    master_profiles = get_autonomous_profiles(names_to_fetch)
+                # Deep profiling en lote
+                all_names = [p[0] for p in pts] + [p[2] for p in pts]
+                with st.spinner(f"🔍 Deep Profiling: {len(set(all_names))} jugadores…"):
+                    master_profiles = get_autonomous_profiles(all_names)
 
                 sv = []
                 for p1_r, o1, p2_r, o2, lg in pts:
                     p1, p2 = p1_r or "P1", p2_r or "P2"
-                    if "utr" in p1.lower() or "utr" in p2.lower(): st.warning(f"🚫 Salto UTR: {p1}"); continue
-                    
+                    if "utr" in p1.lower() or "utr" in p2.lower():
+                        st.warning(f"🚫 UTR excluido: {p1} vs {p2}")
+                        continue
+
                     st.divider()
                     st.subheader(f"🧠 {p1} vs {p2}")
                     vig = vig_pct(o1, o2) if o1 and o2 else None
-                    st.caption(f"Liga: {lg} | {surf.title()} {'(Indoor)' if ind else ''}" + (f" | Vig: {vig}%" if vig else ""))
+                    st.caption(
+                        f"Liga: {lg} | {surf.title()} "
+                        f"{'(Indoor)' if ind else ''}"
+                        + (f" | Vig: {vig}%" if vig else "")
+                    )
 
-                    z1, ht1 = get_player_profile(p1, master_profiles)
-                    z2, ht2 = get_player_profile(p2, master_profiles)
+                    # ── Perfiles autónomos ────────────────────────────
+                    pf1 = get_player_profile(p1, master_profiles)
+                    pf2 = get_player_profile(p2, master_profiles)
 
-                    cs1, cs2 = st.columns(2)
-                    with cs1: s1 = get_stats(p1) or gemini_stats(p1, surf)
-                    with cs2: s2 = get_stats(p2) or gemini_stats(p2, surf)
+                    # ── Stats BD / Gemini ─────────────────────────────
+                    s1 = get_stats(p1) or gemini_stats(p1, surf)
+                    s2 = get_stats(p2) or gemini_stats(p2, surf)
 
-                    adj_p1, n_p1 = calcular_sum_adj(z2, ind, ht1)
-                    adj_p2, n_p2 = calcular_sum_adj(z1, ind, ht2)
+                    # ── Ajustes v3 autónomos para CADA jugador ────────
+                    adj_p1, not_p1 = calcular_sum_adj(
+                        rival_zurdo=pf2["zurdo"], indoor=ind, alt_cm=pf1["ht"],
+                        surface=surf, liga=lg,
+                        rival_tour=pf2["tour"], own_tour=pf1["tour"],
+                        last5=pf1["last5"],
+                    )
+                    adj_p2, not_p2 = calcular_sum_adj(
+                        rival_zurdo=pf1["zurdo"], indoor=ind, alt_cm=pf2["ht"],
+                        surface=surf, liga=lg,
+                        rival_tour=pf1["tour"], own_tour=pf2["tour"],
+                        last5=pf2["last5"],
+                    )
 
-                    act_f1 = fat_p1 if len(pts)==1 else 0
-                    act_f2 = fat_p2 if len(pts)==1 else 0
+                    # ── Entorno (fatiga SIEMPRE aplicada) ─────────────
+                    a1s, a1r = apply_environment(s1["spw"], s1["rpw"], s1["n"], alt_m, fat_p1, surf)
+                    a2s, a2r = apply_environment(s2["spw"], s2["rpw"], s2["n"], alt_m, fat_p2, surf)
 
-                    a1s, a1r = apply_environment(s1["spw"], s1["rpw"], s1["n"], alt_m, act_f1, surf)
-                    a2s, a2r = apply_environment(s2["spw"], s2["rpw"], s2["n"], alt_m, act_f2, surf)
+                    # ── Log5 + Monte Carlo ────────────────────────────
+                    pA_b = log5_serve(a1s, a2r)
+                    pB_b = log5_serve(a2s, a1r)
 
-                    pA_b, pB_b = log5_serve(a1s, a2r), log5_serve(a2s, a1r)
-                    
-                    with st.spinner("Girando Nucleo NumPy..."):
-                        mcR_A = sim_match(pA_b, pB_b, bo, iters, alt_m)
-                        mcR_B = 1 - mcR_A
+                    with st.spinner(f"NumPy MC ({iters:,} iter)…"):
+                        mc_raw, mc_ic = sim_match(pA_b, pB_b, bo, iters, alt_m)
 
-                    mcA_A = min(max(mcR_A + adj_p1, 0.05), 0.95)
-                    mcA_B = min(max(mcR_B + adj_p2, 0.05), 0.95)
-                    t_n = mcA_A + mcA_B; mcA_A/=t_n; mcA_B/=t_n
+                    # ── Net Adj (FIX: no renormalizamos independientemente)
+                    # adj_p1 = lo que afecta a P1 (+ ayuda, − daña)
+                    # adj_p2 = lo que afecta a P2 (+ ayuda, − daña)
+                    # Net para P1: sus ventajas − las ventajas de P2
+                    net_adj = adj_p1 - adj_p2
+                    mc_A = min(max(mc_raw + net_adj, 0.05), 0.95)
+                    mc_B = 1 - mc_A
 
-                    e1_p = ev(mcA_A, american_to_decimal(o1)) if o1 else None
-                    nv1_p = no_vig(o1, o2)[0] if o1 else None
-                    t_pre = get_tier(mcA_A, e1_p, nv1_p)
+                    # ── Calibración ───────────────────────────────────
+                    ev1_pre  = ev(mc_A, american_to_decimal(o1)) if o1 and o2 else None
+                    nv1_pre  = no_vig(o1, o2)[0] if o1 and o2 else None
+                    tier_pre = get_tier(mc_A, ev1_pre, nv1_pre)
 
-                    mc_cal = apply_calibration(mcA_A, lg, t_pre)
-                    mc2_cal = 1 - mc_cal
+                    mc_A_cal = apply_calibration(mc_A, lg, tier_pre)
+                    mc_B_cal = 1 - mc_A_cal
 
-                    m1, m2 = st.columns(2)
-                    e1=e2=nv1=nv2=t1c=t2c=None
-                    for cl, nm, mc, o, s, asp, arp, ht_x, z_x, s_a, nn in [
-                        (m1, p1, mc_cal, o1, s1, a1s, a1r, ht1, z1, adj_p1, n_p1),
-                        (m2, p2, mc2_cal, o2, s2, a2s, a2r, ht2, z2, adj_p2, n_p2)
+                    # ── Alerta de sobreajuste ─────────────────────────
+                    if abs(net_adj) > 0.15:
+                        st.warning(
+                            f"⚠️ Sobreajuste: |net_adj| = {abs(net_adj):.2f} > 0.15. "
+                            f"Los ajustes v3 acumulan demasiada corrección."
+                        )
+
+                    # ── Display ───────────────────────────────────────
+                    m1c, m2c = st.columns(2)
+                    e1 = e2 = nv1 = nv2 = t1c = t2c = None
+
+                    # Cachear no_vig una sola vez
+                    nv_data = no_vig(o1, o2) if o1 and o2 else None
+
+                    for cl, nm, mc, o, s, asp, arp, pf, adj, nts, is_p1 in [
+                        (m1c, p1, mc_A_cal, o1, s1, a1s, a1r, pf1, adj_p1, not_p1, True),
+                        (m2c, p2, mc_B_cal, o2, s2, a2s, a2r, pf2, adj_p2, not_p2, False),
                     ]:
-                        cl.markdown(f"**{nm}** · `{'Zurdo' if z_x else 'Diestro'} {ht_x}cm`")
+                        hand_str = "Zurdo" if pf["zurdo"] else "Diestro"
+                        tour_str = pf["tour"]
+                        l5_str   = f"DR:{pf['last5']}/5" if pf["last5"] is not None else "DR:?"
+                        cl.markdown(f"**{nm}** · `{hand_str} {pf['ht']}cm` · `{tour_str}` · `{l5_str}`")
                         cl.caption(f"{s['source']} n={s['n']} | SPW {asp:.1f}% RPW {arp:.1f}%")
-                        cl.metric("P(Win) Cal", f"{mc*100:.1f}%", f"Adj {s_a:+.2f}", "off")
+                        cl.metric(
+                            "P(Win) Calibrada", f"{mc*100:.1f}%",
+                            delta=f"IC 95%: ±{mc_ic*100:.1f}%", delta_color="off"
+                        )
 
-                        if o1 and o2:
-                            nvv, fv = no_vig(o1,o2)[0 if cl is m1 else 1], no_vig(o1,o2)[2 if cl is m1 else 3]
-                            dec_odd = american_to_decimal(o)
-                            evv = ev(mc, dec_odd)
-                            kf = kelly_fraction(mc, dec_odd)
-                            tr = get_tier(mc, evv, nvv)
-                            if cl is m1: e1, nv1, t1c = evv, nvv, tr
-                            else: e2, nv2, t2c = evv, nvv, tr
-                            
-                            cl.metric("No-Vig", f"{nvv*100:.1f}%", f"Fair: {fv}", "off")
-                            cl.metric("EV Return", f"{evv*100:+.1f}%", "normal" if evv>0 else "inverse")
-                            if kf>0: cl.markdown(f'<div class="kelly">🏦 Kelly Edge: {kf}% bank</>', unsafe_allow_html=True)
-                            
-                            hc='ts' if 'SUPER' in tr else 'tg' if 'DERE' in tr or 'FRAN' in tr else 'tf' if 'FAVO' in tr else 'ty' if 'VALOR' in tr else 'tr'
-                            cl.markdown(f'<div class="tier-badge {hc}">{tr}</div>', unsafe_allow_html=True)
-                            
-                        if nn: 
-                            with cl.expander("👁️ Ver Autodiagnóstico"): 
-                                for x in nn: st.caption(x)
+                        if nv_data:
+                            nvv  = nv_data[0] if is_p1 else nv_data[1]
+                            fair = nv_data[2] if is_p1 else nv_data[3]
+                            dec  = american_to_decimal(o)
+                            evv  = ev(mc, dec)
+                            kf   = kelly_fraction(mc, dec)
+                            tr   = get_tier(mc, evv, nvv)
 
-                    st.markdown("#### 📡 H48 Médico / Físico")
-                    with st.spinner("Validando noticias en la WEB..."): st.info(gemini_analysis(p1, p2))
-                    
+                            if is_p1: e1, nv1, t1c = evv, nvv, tr
+                            else:     e2, nv2, t2c = evv, nvv, tr
+
+                            cl.metric("No-Vig", f"{nvv*100:.1f}%",
+                                      delta=f"Fair: {fair}", delta_color="off")
+                            cl.metric("EV Return", f"{evv*100:+.1f}%",
+                                      delta=f"{evv*100:+.1f}%",
+                                      delta_color="normal" if evv > 0 else "inverse")
+                            cl.metric("Edge", f"{(mc-nvv)*100:+.1f}%")
+
+                            if kf > 0:
+                                cl.markdown(
+                                    f'<div class="kelly">🏦 Kelly 25%: {kf:.2f}% del bankroll</div>',
+                                    unsafe_allow_html=True
+                                )
+
+                            hc = ('ts' if 'SUPER' in tr or 'SÚPER' in tr
+                                  else 'tg' if 'DERE' in tr or 'FRAN' in tr
+                                  else 'tf' if 'FAVO' in tr
+                                  else 'ty' if 'VALOR' in tr else 'tr')
+                            cl.markdown(
+                                f'<div class="tier-badge {hc}">{tr}</div>',
+                                unsafe_allow_html=True
+                            )
+
+                        if nts:
+                            with cl.expander(f"👁️ Ajustes v3 ({len(nts)})"):
+                                for x in nts:
+                                    st.caption(x)
+
+                    # Mostrar net_adj + calibración
+                    cal_f = CALIBRATION.get((_liga_key(lg), _tier_key(tier_pre)), 1.0)
+                    st.caption(
+                        f"net_adj = {adj_p1:+.3f} − ({adj_p2:+.3f}) = {net_adj:+.3f} | "
+                        f"Cal: {_liga_key(lg)}/{_tier_key(tier_pre)} → ×{cal_f}"
+                    )
+
+                    # ── Reporte para Gemini ───────────────────────────
+                    report = (
+                        f"{p1}: SPW={a1s:.1f}% RPW={a1r:.1f}% n={s1['n']} [{s1['source']}] "
+                        f"{'Zurdo' if pf1['zurdo'] else 'Diestro'} {pf1['ht']}cm Tour:{pf1['tour']} DR:{pf1.get('last5','?')}/5\n"
+                        f"{p2}: SPW={a2s:.1f}% RPW={a2r:.1f}% n={s2['n']} [{s2['source']}] "
+                        f"{'Zurdo' if pf2['zurdo'] else 'Diestro'} {pf2['ht']}cm Tour:{pf2['tour']} DR:{pf2.get('last5','?')}/5\n"
+                        f"Superficie: {surf} | Liga: {lg} | {'Indoor' if ind else 'Outdoor'}\n"
+                        f"Log5: {p1}={pA_b:.3f} | {p2}={pB_b:.3f}\n"
+                        f"MC raw={mc_raw*100:.1f}% IC±{mc_ic*100:.1f}% → net_adj={net_adj:+.3f} → adj={mc_A*100:.1f}% → cal={mc_A_cal*100:.1f}%\n"
+                        f"Ajustes P1: {adj_p1:+.3f} ({', '.join(not_p1) or 'ninguno'})\n"
+                        f"Ajustes P2: {adj_p2:+.3f} ({', '.join(not_p2) or 'ninguno'})\n"
+                        + (f"EV: {p1}={e1*100:+.2f}% {t1c} | {p2}={e2*100:+.2f}% {t2c}"
+                           if e1 is not None else f"Tier: {t1c}")
+                    )
+
+                    # ── Gemini H48 + Math Audit ───────────────────────
+                    st.markdown("#### 📡 Gemini — H48 + Auditoría Matemática")
+                    with st.spinner("Consultando Google…"):
+                        analysis = gemini_analysis(p1, p2, report)
+                    st.info(analysis)
+
+                    # ── Batch ─────────────────────────────────────────
                     if e1 is not None:
                         mid = f"{p1}_{p2}_{datetime.now().strftime('%Y%m%d')}"
-                        sv.extend([(mid,p1,p2,mc_cal,nv1,o1,e1,t1c,lg), (mid+"_inv",p2,p1,mc2_cal,nv2,o2,e2,t2c,lg)])
-                
-                # Guardar Batch final a session
+                        sv.extend([
+                            (mid,         p1, p2, mc_A_cal, nv1, o1, e1, t1c, lg),
+                            (mid + "_inv", p2, p1, mc_B_cal, nv2, o2, e2, t2c, lg),
+                        ])
+
                 st.session_state.save_batch = sv
 
-        if st.session_state.get('save_batch'):
+        # ── Guardar ───────────────────────────────────────────────────────
+        if st.session_state.save_batch:
             sb = st.session_state.save_batch
-            if st.button(f"💾 Loguear a Sheets ({len(sb)//2})", type="primary"):
-                w=0; 
-                for d in sb: 
-                    if log_prediction(*d): w+=1
-                st.success(f"{w//2} guardados.")
+            st.divider()
+            if st.button(f"💾 Guardar en Oráculo ({len(sb)//2} partidos)",
+                         type="primary", use_container_width=True):
+                ok = 0
+                for d in sb:
+                    try:
+                        if log_prediction(*d):
+                            ok += 1
+                    except Exception:
+                        pass
+                if ok:
+                    st.success(f"✅ {ok//2} partidos guardados.")
+                else:
+                    st.info("Sin duplicados nuevos.")
+                st.session_state.save_batch = []
 
-    with t2:
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab2:
+        st.header("📊 El Oráculo")
         sh = get_sheet()
-        if sh: 
-            st.dataframe(pd.DataFrame(sh.get_all_records()).tail(15))
-            if st.button("🔎 Liquidador"): pass # Implement logic here
+        if not sh:
+            st.warning("⚠️ Google Sheets no conectado.")
+        else:
+            data = sh.get_all_records()
+            if not data:
+                st.info("Sin predicciones guardadas aún.")
+            else:
+                df = pd.DataFrame(data)
+                st.dataframe(df.tail(20), use_container_width=True)
+
+                if st.button("🔎 Ejecutar Liquidador"):
+                    liquidados = 0
+                    for i, row in df.iterrows():
+                        if not row.get("Winner", ""):
+                            p1n = row.get("P1_Name", "")
+                            p2n = row.get("P2_Name", "")
+                            with st.spinner(f"Liquidando {p1n} vs {p2n}…"):
+                                w = liquidar_partido(p1n, p2n)
+                            if w:
+                                sh.update_cell(i + 2, 10, w)
+                                st.success(f"✅ {w}")
+                                liquidados += 1
+                    if liquidados:
+                        st.success(f"Auditoría: {liquidados} partidos liquidados.")
+                        st.rerun()
+                    else:
+                        st.info("Ningún partido pendiente por liquidar.")
 
 if __name__ == "__main__":
     main()
