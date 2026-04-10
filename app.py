@@ -281,16 +281,29 @@ def sim_match(pA_b: float, pB_b: float, bo: int=3, iters: int=5000, alt: int=0) 
                 if ga==6 and gb==6:
                     a=b=t=0
                     while True:
-                        if random.random() < ((pA if srv else pB) if t%4 in [0,3] else (pB if srv else pA)): a+=1
-                        else: b+=1
+                        A_serving = (t % 4 == 0 or t % 4 == 3) if srv else (t % 4 == 1 or t % 4 == 2)
+                        server_won = random.random() < (pA if A_serving else pB)
+                        if A_serving:
+                            if server_won: a+=1
+                            else: b+=1
+                        else:
+                            if server_won: b+=1
+                            else: a+=1
                         t+=1
-                        if a>=7 and a-b>=2: {ga:=ga+1}; break
-                        if b>=7 and b-a>=2: {gb:=gb+1}; break
+                        if a>=7 and a-b>=2: ga+=1; break
+                        if b>=7 and b-a>=2: gb+=1; break
                     if ga>gb: sA+=1
                     else: sB+=1
                     srv = not srv; break
-                if random.random() < (gA if srv else gB): ga+=1
-                else: gb+=1
+                
+                server_won_game = random.random() < (gA if srv else gB)
+                if srv:
+                    if server_won_game: ga+=1
+                    else: gb+=1
+                else:
+                    if server_won_game: gb+=1
+                    else: ga+=1
+                
                 srv = not srv
                 if (ga>=6 and ga-gb>=2) or ga==7: sA+=1; break
                 if (gb>=6 and gb-ga>=2) or gb==7: sB+=1; break
