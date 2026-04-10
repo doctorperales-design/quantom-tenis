@@ -164,7 +164,8 @@ def parse_matches(text: str) -> list[tuple]:
                 continue
 
         low = line.lower()
-        if any(kw in low for kw in METADATA_KW):
+        # Verificar usando boundaries para evitar que 'mar' borre 'Marcelo'
+        if re.search(r'\b(?:' + '|'.join(map(re.escape, METADATA_KW)) + r')\b', low):
             if "itf" in low or "world tennis" in low: cur_league = "ITF"
             elif "challenger" in low:                  cur_league = "Challenger"
             elif "atp" in low:                         cur_league = "ATP"
@@ -590,7 +591,8 @@ def main():
             else:
                 partidos = parse_matches(txt)
                 if not partidos:
-                    st.error("No se encontraron pares jugador/cuota.")
+                    st.error("No se encontraron pares completos jugador/cuota.")
+                    st.warning("⚠️ OJO: Asegúrate de sombrear/copiar el texto completo (incluyendo la ÚLTIMA cuota de abajo). Si la selección se corta a la mitad, el sistema descarta el partido incompleto.")
                     with st.expander("Debug"):
                         st.code(txt)
                 else:
