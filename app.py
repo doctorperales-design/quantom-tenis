@@ -876,6 +876,62 @@ def main():
                 df = pd.DataFrame(data)
                 st.dataframe(df.tail(20), use_container_width=True)
 
+                if st.button("🚨 CIRUGÍA ORÁCULO (10 ABR) 🚨", type="primary"):
+                    with st.spinner("Purgando aberraciones y rectificando resultados vía API..."):
+                        updates = 0
+                        dels = 0
+                        all_vals = sh.get_all_values()
+                        
+                        to_delete = [
+                            "ruggeri vs. ovcharenko", "madison sieg vs. natalie oliver", 
+                            "valentin vacherot vs. bublik", "alena kovackova vs. michal krajci",
+                            "lilli tagger vs. valentin vacherot", "barnett/sebestova vs. lilli tagger",
+                            "deborah chiesa vs. florent bax"
+                        ]
+                        
+                        winners = {
+                            "nicolás mejía": "Tibo Colson", "falck / lieberman": "Freire Da Silva / Vandermeersch",
+                            "lumsden / ninomiya": "En Shuo Liang / Zhaoxuan Yang", "joel josef": "Roman Safiullin",
+                            "kei nishikori": "Yibing Wu", "payne / shumate": "Gray / Middleton",
+                            "brown / coleman": "Collins / Tanguilig", "william grant": "William Grant",
+                            "karl lee": "Daniil Kakhniuk", "benjamin berger": "Andrew Li",
+                            "zen uehling": "Michael Kaplan", "andrey chepelev": "Max Schoenhaus",
+                            "ana sofia sanchez": "Alina Granwehr", "romero gormaz": "Veronika Erjavec",
+                            "viktorija golubic": "Linda Noskova", "bassols ribera": "Bara / Semenistaja",
+                            "elina avanesyan": "Ane Mintegi Del Olmo", "lisa pigato": "Lina Gjorcheska",
+                            "nerman fatic": "Nicolas Jarry", "jeline vandromme": "Erika Andreeva",
+                            "valentin vacherot": "Alex De Miñaur", "boscardin dias": "Alvaro Guillen Meza",
+                            "karolina pliskova": "Donna Vekic", "beibit zhukayev": "James Duckworth",
+                            "darwin blanch": "Hugo Dellien", "guido ivan": "Gustavo Heide",
+                            "yannik alvarez": "Benjamin Willwerth", "tristan schoolkate": "Stefano Napolitano",
+                            "zolotareva": "Sofya Lansere", "hunter / perez": "Burrage / Dart",
+                            "akira santillan": "Charles Broom", "luca castelnuovo": "James McCabe",
+                            "harry wendelken": "Li Tu", "alex hernandez": "Tibo Colson"
+                        }
+
+                        # Delete from bottom up
+                        for i in range(len(all_vals)-1, 0, -1):
+                            row = all_vals[i]
+                            if len(row) < 4: continue
+                            match_str = f"{row[2]} vs {row[3]}".lower()
+                            
+                            # check deletions
+                            if any(bad in match_str for bad in to_delete):
+                                sh.delete_rows(i + 1)
+                                dels += 1
+                                continue
+                            
+                            # check if winner missing (Index 9 mapped to Col 10/J)
+                            if len(row) <= 9 or not row[9].strip():
+                                for kw, w_name in winners.items():
+                                    if kw in match_str:
+                                        sh.update_cell(i + 1, 10, w_name)
+                                        updates += 1
+                                        break
+                        st.success(f"Quirófano Finalizado: {dels} aberraciones extirpadas | {updates} partidos liquidados.")
+                        st.rerun()
+
+
                 if st.button("🔎 Ejecutar Liquidador"):
                     liquidados = 0
                     for i, row in df.iterrows():
