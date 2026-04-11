@@ -197,35 +197,58 @@ def parse_matches(text: str) -> list[tuple]:
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GEMINI — DEEP AUTONOMOUS PROFILING (expandido: +last5 +tour)
+# GEMINI — DEEP AUTONOMOUS CONTEXT (Profiles + Match Envs)
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
-def get_autonomous_profiles(players: list[str]) -> dict:
-    """Extrae perfil físico + forma + nivel de toda la cuadra en un solo call."""
-    if not players:
-        return {}
+def get_autonomous_context(match_pairs: list[str]) -> dict:
+    """Extrae perfiles de jugadores y condiciones del torneo en un solo call."""
+    if not match_pairs:
+        return {"players": {}, "matches": {}}
     client = get_gemini_client()
     if not client:
-        return {}
+        return {"players": {}, "matches": {}}
 
-    unique = list(set(players))
-    plist  = "\n".join(f"- {p}" for p in unique)
+    unique_players = []
+    for m in match_pairs:
+        for p in m.split(' vs '):
+            if p.strip() not in unique_players:
+                unique_players.append(p.strip())
+                
+    plist  = "\n".join(f"- {p}" for p in unique_players)
+    mlist  = "\n".join(f"- {m}" for m in match_pairs)
 
-    prompt = f"""Devuelve estrictamente un JSON válido, sin explicaciones.
-Para cada jugador busca:
+    prompt = f"""Devuelve estrictamente un JSON válido, sin explicaciones, con 2 bloques: "players" y "matches".
+
+BLOQUE 1 - Jugadores:
+Para cada jugador busca y devuelve:
   hand  → "L" (zurdo) o "R" (diestro)
   ht    → estatura en cm (entero)
-  last5 → victorias en sus últimos 5 partidos oficiales (0–5, estima si no hay datos exactos)
-  tour  → circuito HABITUAL donde más juega: "ATP", "WTA", "Challenger" o "ITF"
+  last5 → victorias en sus últimos 5 partidos (0–5, estima si no hay datos exactos)
+  tour  → circuito HABITUAL humano: "ATP", "WTA", "Challenger" o "ITF"
 
-Jugadores:
 {plist}
 
-Si falta info de alguno, usa: hand="R", ht=183, last5=3, tour="ATP"
+BLOQUE 2 - Partidos Hoy:
+Busca qué torneo están jugando EXACTAMENTE HOY estos emparejamientos y devuelve el entorno de cada partido:
+  surface → "hard", "clay", "grass" o "carpet"
+  indoor  → true o false
+  league  → "ATP", "WTA", "Challenger" o "ITF"
+  alt_m   → altitud de esa ciudad en msnm (entero)
+
+{mlist}
+
+Si falta info usa predeterminados: hand="R", ht=183, last5=3, tour="ATP" para jugadores; surface="hard", indoor=false, league="ATP/WTA", alt_m=0 para partidos.
+Usa las llaves literales exactas enviadas.
+
 Ejemplo de formato:
 {{
-  "Carlos Alcaraz": {{"hand": "R", "ht": 183, "last5": 4, "tour": "ATP"}},
-  "Rafael Nadal": {{"hand": "L", "ht": 185, "last5": 2, "tour": "ATP"}}
+  "players": {{
+    "Carlos Alcaraz": {{"hand": "R", "ht": 183, "last5": 4, "tour": "ATP"}},
+    "Rafael Nadal": {{"hand": "L", "ht": 185, "last5": 2, "tour": "ATP"}}
+  }},
+  "matches": {{
+    "Carlos Alcaraz vs Rafael Nadal": {{"surface": "clay", "indoor": false, "league": "ATP", "alt_m": 600}}
+  }}
 }}"""
 
     try:
@@ -236,16 +259,22 @@ Ejemplo de formato:
         )
         raw = r.text.replace("```json", "").replace("```", "").strip()
         s, e = raw.find('{'), raw.rfind('}')
-        data = json.loads(raw[s:e+1]) if s != -1 and e != -1 else {}
-        return {k.lower().strip(): v for k, v in data.items()}
+        data = json.loads(raw[s:e+1]) if s != -1 and e != -1 else {"players": {}, "matches": {}}
+        
+        # Normalize player keys
+        prof_norm = {k.lower().strip(): v for k, v in data.get("players", {}).items()}
+        # Normalize match keys
+        match_norm = {k.lower().strip(): v for k, v in data.get("matches", {}).items()}
+        
+        return {"players": prof_norm, "matches": match_norm}
     except Exception:
-        return {}
+        return {"players": {}, "matches": {}}
 
-def get_player_profile(name: str, profiles: dict) -> dict:
-    """Busca jugador en el dict. Retorna perfil completo."""
+def get_player_profile(name: str, master_context: dict) -> dict:
+    """Busca jugador en el dict."""
     norm = name.lower().strip()
     last = norm.split()[-1] if " " in norm else norm
-    for k, v in profiles.items():
+    for k, v in master_context.get("players", {}).items():
         if k in norm or norm in k or last in k:
             return {
                 "zurdo": v.get("hand", "R") == "L",
@@ -254,6 +283,19 @@ def get_player_profile(name: str, profiles: dict) -> dict:
                 "tour":  v.get("tour", "ATP"),
             }
     return {"zurdo": False, "ht": 183, "last5": None, "tour": "ATP"}
+
+def get_match_context(mstr: str, default_lg: str, master_context: dict) -> dict:
+    norm = mstr.lower().strip()
+    for k, v in master_context.get("matches", {}).items():
+        if k in norm or norm in k:
+            return {
+                "surface": v.get("surface", "hard").lower(),
+                "indoor":  bool(v.get("indoor", False)),
+                "league":  v.get("league", default_lg),
+                "alt_m":   int(v.get("alt_m", 0))
+            }
+    return {"surface": "hard", "indoor": False, "league": default_lg, "alt_m": 0}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CALIBRACIÓN HISTÓRICA
@@ -631,12 +673,8 @@ def main():
 
     with st.sidebar:
         st.header("🌍 Ecosistema")
-        st.info("🤖 Autonomía: Gemini extrae Mano, Altura, DR5, Tour automáticamente.")
-        alt_m = st.number_input("Altitud (msnm)", 0, 4000, 0, 100)
-        ind   = st.checkbox("Torneo Indoor")
-        surf  = st.selectbox("Superficie", ["hard", "clay", "grass", "carpet"])
-        st.caption(f"Adj superficie → SPW {SURFACE_ADJ[surf]['spw']:+.1f}% / RPW {SURFACE_ADJ[surf]['rpw']:+.1f}%")
-        st.divider()
+        st.info("🤖 Autonomía Nivel Dios: Gemini parametriza Torneo, Superficie, Altitud y Jugadores dinámicamente con una lectura en vivo.")
+        
         st.header("🤕 Fatiga (0–5)")
         fat_p1 = st.slider("Fatiga P1", 0, 5, 0)
         fat_p2 = st.slider("Fatiga P2", 0, 5, 0)
@@ -669,30 +707,39 @@ def main():
                 st.error("No se detectaron emparejamientos.")
                 st.warning("Asegúrate de copiar el texto completo incluyendo la última cuota.")
             else:
-                # Deep profiling en lote
-                all_names = [p[0] for p in pts] + [p[2] for p in pts]
-                with st.spinner(f"🔍 Deep Profiling: {len(set(all_names))} jugadores…"):
-                    master_profiles = get_autonomous_profiles(all_names)
+                # Extraemos emparejamientos
+                match_pairs = [f"{p[0]} vs {p[2]}" for p in pts]
+                with st.spinner(f"🌐 Extrayendo Contexto Global (Torneos y {len(match_pairs)*2} jugadores)…"):
+                    master_context = get_autonomous_context(match_pairs)
 
                 sv = []
-                for p1_r, o1, p2_r, o2, lg in pts:
+                for p1_r, o1, p2_r, o2, lg_parsed in pts:
                     p1, p2 = p1_r or "P1", p2_r or "P2"
                     if "utr" in p1.lower() or "utr" in p2.lower():
                         st.warning(f"🚫 UTR excluido: {p1} vs {p2}")
                         continue
 
+                    # Contexto del torneo
+                    mkey = f"{p1} vs {p2}"
+                    m_env = get_match_context(mkey, lg_parsed, master_context)
+                    surf  = m_env["surface"]
+                    ind   = m_env["indoor"]
+                    lg    = m_env["league"]
+                    alt_m = m_env["alt_m"]
+
                     st.divider()
                     st.subheader(f"🧠 {p1} vs {p2}")
                     vig = vig_pct(o1, o2) if o1 and o2 else None
+                    
                     st.caption(
                         f"Liga: {lg} | {surf.title()} "
-                        f"{'(Indoor)' if ind else ''}"
-                        + (f" | Vig: {vig}%" if vig else "")
+                        f"{'(Indoor)' if ind else ''} | Altitud: {alt_m}m "
+                        + (f"| Vig: {vig}%" if vig else "")
                     )
 
                     # ── Perfiles autónomos ────────────────────────────
-                    pf1 = get_player_profile(p1, master_profiles)
-                    pf2 = get_player_profile(p2, master_profiles)
+                    pf1 = get_player_profile(p1, master_context)
+                    pf2 = get_player_profile(p2, master_context)
 
                     # ── Stats BD / Gemini ─────────────────────────────
                     s1 = get_stats(p1) or gemini_stats(p1, surf)
