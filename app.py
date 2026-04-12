@@ -603,15 +603,23 @@ def compute_adjustments(s1: dict, s2: dict, h2h: dict, surface: str,
 # ─────────────────────────────────────────────────────────────────────────────
 def classify(pmod: float, ev_pct: float, odd_dec: float) -> tuple[str, str]:
     if pmod < 0.45: return "BASURA", "🗑️"
-    if pmod >= 0.70:
-        if ev_pct >= 3.0: return "FAVORITO LIMPIO", "🟢"
-        elif ev_pct >= 0.0: return "FAVORITO VALOR BAJO", "🟢⚠️"
-        else: return "FAVORITO SOBREVENDIDO", "🟢🚨"
+    
+    # Lógica para Underdogs en la casa de apuestas (Cuota Positiva/Francotiradores)
+    if odd_dec >= 2.0:
+        if pmod >= 0.65: return "BOMBA NUCLEAR", "💣"  # Paga riquísimo y es altamente probable
+        if pmod >= 0.45 and ev_pct >= 10.0: return "FRANCOTIRADOR", "🎯"
+        return "BASURA", "🗑️"
 
-    if ev_pct >= 15.0 and odd_dec > 2.0: return "FRANCOTIRADOR", "🎯"
-    elif ev_pct >= 6.5: return "DERECHA", "✅"
-    elif ev_pct >= 4.0: return "PARLAY", "🟡"
-    else: return "BASURA", "🗑️"
+    # Lógica para Favoritos en la casa de apuestas (Cuota Negativa/Derechas)
+    if pmod >= 0.70:
+        if ev_pct >= 3.0: return "SUPER DERECHA", "🟢"
+        elif ev_pct >= 0.0: return "DERECHA", "✅"
+        else: return "VA A GANAR PERO EV MALO", "🔵"
+
+    if pmod >= 0.60:
+        if ev_pct >= 4.0: return "PARLAY", "🟡"
+        
+    return "BASURA", "🗑️"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PARSER DE SPORTSBOOK
