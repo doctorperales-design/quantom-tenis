@@ -178,6 +178,34 @@ def extract_match_context(p1: str, p2: str) -> dict:
     except Exception:
         return {"surface": "Hard", "tourney": "Unknown", "altitude": 0, "level": "ATP"}
 
+def batch_guess_winners_gemini(matches: list[dict]) -> dict:
+    if not matches: return {}
+    client = get_gemini_client()
+    if not client: return {m['match_id']: "Ninguno" for m in matches}
+    
+    prompt = "Eres un buscador de resultados de tenis. Busca el resultado de los siguientes partidos de tenis recién jugados:\n"
+    for m in matches:
+        prompt += f"- ID '{m['match_id']}': {m['p1']} vs {m['p2']}\n"
+    prompt += """
+Devuelve ÚNICAMENTE un JSON crudo con las respuestas. 
+Usa la estructura: {"match_id": "Nombre Exacto del Ganador"}.
+Usa estrictamente los nombres de los jugadores tal y como te los envié.
+Si no encuentras el resultado o se canceló, pon "Ninguno".
+Ejemplo: {"id_1": "Carlos Alcaraz", "id_2": "Ninguno"}
+"""
+    try:
+        r = client.models.generate_content(
+            model=GEMINI_MODEL, contents=prompt,
+            config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.1)
+        )
+        raw = r.text.replace("```json", "").replace("```", "").strip()
+        s, e = raw.find('{'), raw.rfind('}')
+        if s != -1 and e != -1:
+            return json.loads(raw[s:e+1])
+        return {}
+    except Exception:
+        return {}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PARSER HÍBRIDO (JSONL/CSV) — LECTURA SEGURA
 # ─────────────────────────────────────────────────────────────────────────────
@@ -809,7 +837,7 @@ Responde corto con Contexo, Auditoría y Veredicto."""
         return f"Error Gemini: {e}"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GOOGLE SHEETS
+# GOOGLE SHEETS & SAVE CALLBACK
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_sheet():
@@ -854,6 +882,16 @@ def get_pending_matches():
         return pending
     except Exception: return []
 
+def save_predictions_callback():
+    partidos = st.session_state.get('last_procesados', [])
+    logged = 0
+    for p in partidos:
+        try:
+            if log_prediction(p['match_id'], p['p1'], p['p2'], p['pmod'], p['nv1'], p['odd1'], p['ev1'], p['tier'], p['league'], p['ic'], ""):
+                logged += 1
+        except Exception:
+            pass
+    st.session_state.save_msg = f"¡{logged} partidos guardados exitosamente en el Oráculo!"
 # ─────────────────────────────────────────────────────────────────────────────
 # UI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -876,7 +914,11 @@ def main():
 
     with st.expander("👁️ VER EL GRAN ORÁCULO DE GOOGLE SHEETS", expanded=False):
         components.iframe("https://docs.google.com/spreadsheets/d/1kciFhxjiVOeScsu_7e6UZvJ36ungHyeQxjIWMBu5CYs/edit?usp=sharing", height=500, scrolling=True)
-
+        
+    if st.session_state.get("save_msg"):
+        st.success(st.session_state.save_msg)
+        st.balloons()
+        st.session_state.save_msg = ""
 
     if not gemini_available():
         st.error("⚠️ Falta GOOGLE_API_KEY en tu archivo .env")
@@ -890,16 +932,88 @@ def main():
     with c3:
         if st.button("🗑️ Limpiar", use_container_width=True):
             st.session_state.txt = ""
+            st.session_state.analisis_ejecucion = None
             st.rerun()
 
     txt = st.text_area("📋 Pega los partidos (formato Caliente o 'Sinner -120 vs Alcaraz +100'):", key="txt", height=160, placeholder="Alcaraz C\nSinner J\n-140\n+110")
 
-    if not st.button("🚀 Analizar", type="primary", use_container_width=True): return
-    if not txt.strip():
-        st.warning("Pega al menos un partido.")
+    btn_analizar = st.button("🚀 Analizar", type="primary", use_container_width=True)
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # AGENTE LIQUIDADOR DEVUELTO A LA PÁGINA DE INICIO (BAJO ANALIZAR)
+    # ─────────────────────────────────────────────────────────────────────────────
+    st.divider()
+    with st.container():
+        st.subheader("🎯 AGENTE LIQUIDADOR — Búsqueda Autónoma de Ganadores")
+        if st.button("🔄 Cargar partidos pendientes desde Google Sheets"):
+            with st.spinner("Descargando del Oráculo y buscando ganadores en internet con Gemini..."):
+                pendientes = get_pending_matches()
+                if pendientes:
+                    sugerencias = batch_guess_winners_gemini(pendientes)
+                    for p in pendientes:
+                        win = sugerencias.get(p['match_id'], "Ninguno")
+                        p['suggested_winner'] = "Ninguno"
+                        if win != "Ninguno":
+                            if p['p1'].lower() in win.lower() or win.lower() in p['p1'].lower(): p['suggested_winner'] = p['p1']
+                            elif p['p2'].lower() in win.lower() or win.lower() in p['p2'].lower(): p['suggested_winner'] = p['p2']
+                    st.session_state.pending_matches = pendientes
+                else:
+                    st.session_state.pending_matches = []
+                    st.session_state.pending_error = "⚠️ No se encontró la llave de Google Sheets (st.secrets) en este entorno local, o no hay partidos pendientes en la hoja."
+            st.rerun()
+
+        if st.session_state.get("pending_error"):
+            st.warning(st.session_state.pending_error)
+            st.session_state.pending_error = ""
+
+        pendientes = st.session_state.get("pending_matches", [])
+        if pendientes:
+            st.info(f"{len(pendientes)} partidos pendientes. Gemini sugiere los resultados en verde. Verifica y liquida.")
+            with st.form("form_liquidador_pendiente"):
+                ganadores_pendientes = {}
+                for p in pendientes:
+                    sug = p.get('suggested_winner', "Ninguno")
+                    color1 = "green" if sug == p['p1'] else "white"
+                    color2 = "green" if sug == p['p2'] else "white"
+                    st.markdown(f"**:{color1}[{p['p1']}] vs :{color2}[{p['p2']}]**")
+                    
+                    try: def_index = ["Ninguno", p['p1'], p['p2']].index(sug)
+                    except ValueError: def_index = 0
+                    
+                    ganadores_pendientes[p['match_id']] = st.radio(
+                        "¿Quién ganó?", ["Ninguno", p['p1'], p['p2']], 
+                        index=def_index,
+                        key=f"pen_{p['match_id']}", horizontal=True, label_visibility="collapsed"
+                    )
+                    st.write("")
+                
+                if st.form_submit_button("🚀 FORZAR RESULTADOS AL GOOGLE SHEET", type="primary"):
+                    for p in pendientes:
+                        real_winner = ganadores_pendientes[p['match_id']]
+                        if real_winner != "Ninguno":
+                            log_prediction(p['match_id'], p['p1'], p['p2'], 0, 0, None, None, "", "", 0, real_winner)
+                    st.session_state.pending_matches = []
+                    st.success("¡Liquidados exitosamente! Tu base queda calibrada.")
+                    st.balloons()
+        else:
+            st.write("Haz click en Cargar pendientes para conectar con el Oráculo.")
+            
+    st.divider()
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # LÓGICA DE ANÁLISIS SOSTENIDA 100% BLINDADA
+    # ─────────────────────────────────────────────────────────────────────────────
+    if btn_analizar:
+        if not txt.strip():
+            st.warning("Pega al menos un partido.")
+        else:
+            st.session_state.analisis_ejecucion = txt
+
+    if not st.session_state.get("analisis_ejecucion"):
         return
 
-    partidos = parse_matches(txt)
+    # Analizamos SIEMPRE la variable blindada, así nunca se vacía por reruns fantasma
+    partidos = parse_matches(st.session_state.analisis_ejecucion)
     if not partidos:
         st.error("No se encontraron pares.")
         return
@@ -1043,48 +1157,9 @@ IC: {ic:.2f} | sum_adj: {sum_adj:+.3f}
         })
 
     if partidos_procesados:
-        # Botón sencillo de guardado (sin ganador dictaminado aún para evaluarlo el próximo día)
-        if st.button("💾 Guardar Análisis Actual en Oráculo", type="primary", use_container_width=True):
-            with st.spinner("Guardando en Google Sheets..."):
-                logged = 0
-                for p in partidos_procesados:
-                    if log_prediction(p['match_id'], p['p1'], p['p2'], p['pmod'], p['nv1'], p['odd1'], p['ev1'], p['tier'], p['league'], p['ic'], ""):
-                        logged += 1
-                if logged > 0: st.success(f"¡{logged} partidos insertados al final del Google Sheet listos para liquidación mañana!")
-                else: st.warning("Partidos ya existían o error de conexión.")
-
-    # ─────────────────────────────────────────────────────────────────────────────
-    # AGENTE LIQUIDADOR — LECTURA DE PENDIENTES DESDE SHEET MAESTRO (PARA EL DÍA SIGUIENTE)
-    # ─────────────────────────────────────────────────────────────────────────────
-    st.divider()
-    with st.expander("🎯 AGENTE LIQUIDADOR — Forzar Ganadores Pendientes de Días Anteriores", expanded=False):
-        if st.button("🔄 Cargar partidos pendientes desde Google Sheets"):
-            st.session_state.pending_matches = get_pending_matches()
-
-        pendientes = st.session_state.get("pending_matches", [])
-        if pendientes:
-            st.info(f"{len(pendientes)} partidos sin resultado encontrados.")
-            with st.form("form_liquidador_pendiente"):
-                ganadores_pendientes = {}
-                for p in pendientes:
-                    st.write(f"**{p['p1']} vs {p['p2']}**")
-                    ganadores_pendientes[p['match_id']] = st.radio(
-                        "¿Quién ganó?", ["Ninguno", p['p1'], p['p2']], 
-                        key=f"pen_{p['match_id']}", horizontal=True
-                    )
-                
-                submit_liq = st.form_submit_button("🚀 FORZAR RESULTADOS AL GOOGLE SHEET", type="primary")
-                if submit_liq:
-                    for p in pendientes:
-                        real_winner = ganadores_pendientes[p['match_id']]
-                        if real_winner != "Ninguno":
-                            # Refrescar la base con update_cell internamente por ser ya existente
-                            log_prediction(p['match_id'], p['p1'], p['p2'], 0, 0, None, None, "", "", 0, real_winner)
-                    st.session_state.pending_matches = [] # Limpiar tabla cacheada
-                    st.success("¡Liquidados exitosamente! Tu base queda calibrada y limpia de alucinaciones.")
-                    st.balloons()
-        else:
-            st.write("Haz click en Cargar pendientes para conectar con el Oráculo.")
+        st.session_state.last_procesados = partidos_procesados
+        # Botón sencillo de guardado mediante callback
+        st.button("💾 Guardar Análisis Actual en Oráculo", on_click=save_predictions_callback, type="primary", use_container_width=True)
 
 if __name__ == "__main__":
     main()
