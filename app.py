@@ -1028,6 +1028,13 @@ IC: {ic:.2f} | sum_adj: {sum_adj:+.3f}
         with st.spinner("Gemini buscando contexto y generando veredicto…"):
             st.markdown(gemini_full_analysis(p1, p2, report_full))
 
+        partidos_procesados.append({
+            "match_id": f"{p1}_{p2}_{datetime.now().strftime('%Y%m%d')}",
+            "p1": p1, "p2": p2, "pmod": pmod_final, "nv1": nv1 if odd1 and odd2 else 0,
+            "odd1": odd1, "ev1": ev1 if odd1 and odd2 else 0, "tier": tier1 if odd1 and odd2 else "S/C", "league": level, "ic": ic
+        })
+
+    if partidos_procesados:
         # Botón sencillo de guardado (sin ganador dictaminado aún para evaluarlo el próximo día)
         if st.button("💾 Guardar Análisis Actual en Oráculo", type="primary", use_container_width=True):
             with st.spinner("Guardando en Google Sheets..."):
