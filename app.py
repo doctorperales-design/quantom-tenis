@@ -1,33 +1,10 @@
 """
-Quantum Tennis Engine v8.0 — Autonomous Audit Edition
-Markov Chains · Shrinkage Bayesiano · Oráculo Enriquecido 2022-2025
-Bugs corregidos y mejoras aplicadas sobre v7.0
-
-CHANGELOG v8.0 vs v7.0:
-──────────────────────────────────────────────────────────────────────
-BUG #1  adj_rpw fatiga truncada — la línea estaba vacía, fatiga nunca se aplicaba a RPW
-BUG #2  DB_PATH apuntaba a "matches_jsonl.jsonl" — ahora lee matches_comprimidos.csv (26 cols)
-BUG #3  Sin filtro de nivel — get_stats leía TODOS los registros sin respetar LEVEL FILTER
-BUG #4  Sin filtro de superficie — stats se calculaban mezclando todas las superficies
-BUG #5  Sin filtro de fecha — ahora se filtran registros > 36 meses para H2H
-BUG #6  parse_matches no extraía liga/circuito — imposible activar filtros de nivel
-BUG #7  Fallback genérico no distinguía Hold de SPW — ahora incluye hold, spw, rpw
-BUG #8  Anti-Ceros threshold (≤10%) demasiado bajo — subido a ≤25% con floor por superficie
-
-MEJORA #1  Nuevas columnas del oráculo: Date, Minutes, W_Rank, L_Rank, Tourney, Round
-MEJORA #2  H2H directo reciente (≤36 meses) calculado desde el CSV
-MEJORA #3  Fatiga calculada desde columna Minutes (ya no depende solo de Gemini)
-MEJORA #4  Court Pace por torneo (rápida/lenta) aplicado automáticamente
-MEJORA #5  Tier Drop post-lesión detectado vía W_Rank/L_Rank
-MEJORA #6  Clutch Differential (BP Saved% + BP Converted%) incluido
-MEJORA #7  Dominance Ratio últimos 5 partidos calculado
-MEJORA #8  Filtro MUESTRA MIXTA con etiqueta y penalización IC
-MEJORA #9  Semáforo completo con todas las categorías del modelo original
-MEJORA #10 Tanking Check básico (derrotas rápidas recientes)
-──────────────────────────────────────────────────────────────────────
+Quantum Tennis Engine v8.1 — Autonomous Audit Edition
+Markov Chains · Shrinkage Bayesiano · Oráculo Premium 2022-2025
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import json
 import os
 import re
@@ -45,8 +22,6 @@ load_dotenv()
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 GEMINI_MODEL  = "gemini-2.5-pro"
-# NOTA ANTIGRAVITY: Si cambian a archivo puramente .jsonl, solo renombra esto.
-# Añadí lógica híbrida abajo para leer tanto CSV real como JSONL en ese archivo.
 DB_PATH       = "matches_comprimidos.csv"      
 MC_ITERATIONS = 50000                            
 
@@ -142,21 +117,16 @@ def extract_match_context(p1: str, p2: str) -> dict:
         return {"surface": "Hard", "tourney": "Unknown", "altitude": 0, "level": "ATP"}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PARSER HÍBRIDO (JSONL/CSV) — LECTURA SEGURA
+# PARSER HÍBRIDO (JSONL/CSV)
 # ─────────────────────────────────────────────────────────────────────────────
 def _parse_db_line(line: str) -> list | None:
-    """Intenta procesar la línea como JSON, de lo contrario la asume CSV."""
     line = line.strip()
     if not line: return None
     if line.startswith('['):
-        try:
-            return json.loads(line)
-        except Exception:
-            pass
-    # Intento CSV rápido
+        try: return json.loads(line)
+        except Exception: pass
     try:
         parts = next(csv.reader([line]))
-        # Convertir a ints si es posible (ej: rec[0] Srf)
         parsed = []
         for p in parts:
             p = p.strip()
@@ -261,7 +231,6 @@ def get_stats(name: str, surface: str = "Hard", level: str = "ATP",
         st.warning(f"⚠️ Archivo BD no encontrado: {path}")
         return None
     except Exception as e:
-        st.error(f"BD error: {e}")
         return None
 
     if n_surface < 10 and n_total >= 10:
@@ -451,7 +420,7 @@ def check_tier_drop(name: str, level: str, path: str = DB_PATH) -> bool:
     return best_recent <= 100
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FÍSICA Y ENTORNO
+# FÍSICA Y ENTORNO (SHRINKAGE PRESERVING SUM LÓGICA DE CLAUDE)
 # ─────────────────────────────────────────────────────────────────────────────
 def apply_environment(spw: float, rpw: float, n: int,
                       altitude_m: int, fatigue_mins: int,
@@ -463,6 +432,7 @@ def apply_environment(spw: float, rpw: float, n: int,
     confidence = min(n / 20.0, 1.0) if n > 0 else 0.0
     shrink     = 0.35 * (1.0 - confidence)
 
+    # Lógica de Shrinkage conservando la suma total (Correción 5.3)
     total_points = spw + rpw
     adj_total = total_points * (1 - shrink) + (AVG_SPW + AVG_RPW) * shrink
     adj_spw = (spw / total_points) * adj_total if total_points > 0 else AVG_SPW
@@ -641,7 +611,7 @@ def parse_matches(text: str) -> list[tuple]:
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MATEMÁTICA LOCAL
+# MATEMÁTICA LOCAL (CADENAS DE MARKOV + MONTECARLO)
 # ─────────────────────────────────────────────────────────────────────────────
 def american_to_decimal(odd: int) -> float:
     if odd > 0: return (odd / 100.0) + 1.0
@@ -775,7 +745,7 @@ def get_sheet():
         return gc.open_by_key("1kciFhxjiVOeScsu_7e6UZvJ36ungHyeQxjIWMBu5CYs").sheet1
     except Exception: return None
 
-def log_prediction(match_id, p1, p2, p_mod, p_casa, odd, ev_val, tier, league, ic):
+def log_prediction(match_id, p1, p2, p_mod, p_casa, odd, ev_val, tier, league, ic, real_winner=""):
     sheet = get_sheet()
     if not sheet: return False
     try:
@@ -784,18 +754,32 @@ def log_prediction(match_id, p1, p2, p_mod, p_casa, odd, ev_val, tier, league, i
             match_id, datetime.now().strftime("%Y-%m-%d %H:%M"),
             p1, p2, f"{p_mod*100:.1f}%", f"{p_casa*100:.1f}%" if p_casa else "S/C",
             str(odd) if odd else "S/C", f"{ev_val*100:+.1f}%" if ev_val is not None else "S/C",
-            tier, "", league, f"{ic:.2f}"
+            tier, real_winner, league, f"{ic:.2f}"
         ])
         return True
     except Exception: return False
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UI
+# UI PRINCIPAL
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(page_title="Quantum Tennis v8.1", page_icon="🎾", layout="wide")
+    st.markdown("""
+    <style>
+    /* Inyección de Modo Oscuro Premium */
+    .stApp { background-color: #0E1117; color: #FAFAFA; }
+    .stTextInput>div>div>input, .stTextArea>div>div>textarea { background-color: #262730; color: white; border: 1px solid #4CAF50; }
+    .stButton>button { background-color: #1E1E1E; color: #4CAF50; border: 1px solid #4CAF50; font-weight: bold; }
+    .stButton>button:hover { background-color: #4CAF50; color: white; }
+    </style>
+    """, unsafe_allow_html=True)
+    
     st.title("🎾 Quantum Tennis Engine v8.1 — Oráculo Math Audit Edition")
     st.caption("Motor local (Log5 · Markov MC 50k) · Oráculo 40k+ registros (2022-2024) · Filtros Nivel/Superficie/Fecha · H2H · Clutch · DR · Fatiga · Court Pace · Gemini 2.5 Pro Search Grounding")
+
+    with st.expander("👁️ VER EL GRAN ORÁCULO DE GOOGLE SHEETS", expanded=False):
+        components.iframe("https://docs.google.com/spreadsheets/d/1kciFhxjiVOeScsu_7e6UZvJ36ungHyeQxjIWMBu5CYs/edit?usp=sharing", height=500, scrolling=True)
+
 
     if not gemini_available():
         st.error("⚠️ Falta GOOGLE_API_KEY en tu archivo .env")
@@ -822,6 +806,8 @@ def main():
     if not partidos:
         st.error("No se encontraron pares.")
         return
+
+    partidos_procesados = []
 
     for p1_raw, odd1, p2_raw, odd2, league in partidos:
         p1, p2 = p1_raw or "Jugador 1", p2_raw or "Jugador 2"
@@ -873,7 +859,7 @@ def main():
 
         pA, pB = log5_serve(adj_spw1, adj_rpw2), log5_serve(adj_spw2, adj_rpw1)
 
-        with st.spinner(f"Corriendo {MC_ITERATIONS:,} simulaciones Gaussianas…"):
+        with st.spinner(f"Corriendo {MC_ITERATIONS:,} simulaciones probabilísticas…"):
             mc_A = sim_match(pA, pB, best_of)
             mc_B = 1 - mc_A
 
@@ -933,13 +919,12 @@ def main():
 | **EV Edge** | {ev1*100:+.1f}% |
 | **IC Confianza** | {ic:.2f} {' '.join('['+t+']' for t in s1.get('tags',[]))} |
 | **STATUS FINAL** | {tier1} {emoji1} |
-| **TANKING CHECK** | {'⚠️ SÍ' if tank_p1 else 'NO'} ({p1}) \| {'⚠️ SÍ' if tank_p2 else 'NO'} ({p2}) |
+| **TANKING CHECK** | {'⚠️ SÍ' if tank_p1 else 'NO'} ({p1}) \\| {'⚠️ SÍ' if tank_p2 else 'NO'} ({p2}) |
 | **H2H reciente** | {h2h['p1_wins']}-{h2h['p2_wins']} ({h2h['total']} partidos ≤36m) |
 """)
             with st.expander("🔧 Ajustes aplicados al modelo"):
                 for note in adj_notes + env_notes1 + env_notes2: st.write(f"• {note}")
                 st.write(f"**sum_adj total: {sum_adj:+.3f}**")
-            log_prediction(f"{p1}_{p2}_{datetime.now().strftime('%Y%m%d')}", p1, p2, pmod_final, nv1, odd1, ev1, tier1, level, ic)
 
         st.markdown("#### 🤖 Gemini — Análisis H48 + Veredicto")
         report_full = f"""
@@ -953,6 +938,31 @@ IC: {ic:.2f} | sum_adj: {sum_adj:+.3f}
 """
         with st.spinner("Gemini buscando contexto y generando veredicto…"):
             st.markdown(gemini_full_analysis(p1, p2, report_full))
+
+        # En lugar de guardar en automático, guardamos la info para el liquidador final
+        partidos_procesados.append({
+            "match_id": f"{p1}_{p2}_{datetime.now().strftime('%Y%m%d')}",
+            "p1": p1, "p2": p2, "pmod": pmod_final, "nv1": nv1 if odd1 and odd2 else 0,
+            "odd1": odd1, "ev1": ev1 if odd1 and odd2 else 0, "tier": tier1 if odd1 and odd2 else "S/C", "league": level, "ic": ic
+        })
+
+    if partidos_procesados:
+        st.divider()
+        st.markdown("### 💾 Agente Liquidador — Forzar Ganadores y Guardar en Oráculo")
+        with st.form("form_liquidador"):
+            ganadores = {}
+            for p in partidos_procesados:
+                st.write(f"**{p['p1']} vs {p['p2']}**")
+                ganadores[p['match_id']] = st.radio("¿Quién ganó realmente?", ["Ninguno (Pendiente)", p['p1'], p['p2']], key=f"win_{p['match_id']}", horizontal=True)
+            
+            submit = st.form_submit_button("🚀 Enviar Resultados al Excel (Google Sheets)", type="primary")
+            if submit:
+                for p in partidos_procesados:
+                    real_winner = ganadores[p['match_id']]
+                    if real_winner == "Ninguno (Pendiente)": real_winner = ""
+                    log_prediction(p['match_id'], p['p1'], p['p2'], p['pmod'], p['nv1'], p['odd1'], p['ev1'], p['tier'], p['league'], p['ic'], real_winner)
+                st.success("¡Datos y resultados inyectados correctamente al Oráculo!")
+                st.balloons()
 
 if __name__ == "__main__":
     main()
