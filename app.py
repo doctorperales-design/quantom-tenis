@@ -364,6 +364,8 @@ def get_stats(name: str, surface: str, level: str, oracle: list[list]) -> dict |
         return _get_stats_all_surfaces(name, level, oracle, mixed_sample=True)
 
     if n_surface == 0:
+        if level != "ITF":
+            return get_stats(name, surface, "ITF", oracle)
         return None
 
     spw = sv_won / sv_pts * 100 if sv_pts else 0
@@ -441,6 +443,8 @@ def _get_stats_all_surfaces(name: str, level: str, oracle: list[list],
         n += 1
 
     if n == 0:
+        if level != "ITF":
+            return _get_stats_all_surfaces(name, "ITF", oracle, mixed_sample)
         return None
 
     spw = max(25.1, sv_won / sv_pts * 100 if sv_pts else 55.0)
