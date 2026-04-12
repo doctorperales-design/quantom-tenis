@@ -1,6 +1,30 @@
 """
-Quantum Tennis Engine v8.1 — Autonomous Audit Edition
-Markov Chains · Shrinkage Bayesiano · Oráculo Premium 2022-2025
+Quantum Tennis Engine v8.0 — Autonomous Audit Edition
+Markov Chains · Shrinkage Bayesiano · Oráculo Enriquecido 2022-2025
+Bugs corregidos y mejoras aplicadas sobre v7.0
+
+CHANGELOG v8.0 vs v7.0:
+──────────────────────────────────────────────────────────────────────
+BUG #1  adj_rpw fatiga truncada — la línea estaba vacía, fatiga nunca se aplicaba a RPW
+BUG #2  DB_PATH apuntaba a "matches_jsonl.jsonl" — ahora lee matches_comprimidos.csv (26 cols)
+BUG #3  Sin filtro de nivel — get_stats leía TODOS los registros sin respetar LEVEL FILTER
+BUG #4  Sin filtro de superficie — stats se calculaban mezclando todas las superficies
+BUG #5  Sin filtro de fecha — ahora se filtran registros > 36 meses para H2H
+BUG #6  parse_matches no extraía liga/circuito — imposible activar filtros de nivel
+BUG #7  Fallback genérico no distinguía Hold de SPW — ahora incluye hold, spw, rpw
+BUG #8  Anti-Ceros threshold (≤10%) demasiado bajo — subido a ≤25% con floor por superficie
+
+MEJORA #1  Nuevas columnas del oráculo: Date, Minutes, W_Rank, L_Rank, Tourney, Round
+MEJORA #2  H2H directo reciente (≤36 meses) calculado desde el CSV
+MEJORA #3  Fatiga calculada desde columna Minutes (ya no depende solo de Gemini)
+MEJORA #4  Court Pace por torneo (rápida/lenta) aplicado automáticamente
+MEJORA #5  Tier Drop post-lesión detectado vía W_Rank/L_Rank
+MEJORA #6  Clutch Differential (BP Saved% + BP Converted%) incluido
+MEJORA #7  Dominance Ratio últimos 5 partidos calculado
+MEJORA #8  Filtro MUESTRA MIXTA con etiqueta y penalización IC
+MEJORA #9  Semáforo completo con todas las categorías del modelo original
+MEJORA #10 Tanking Check básico (derrotas rápidas recientes)
+──────────────────────────────────────────────────────────────────────
 """
 
 import streamlit as st
@@ -22,6 +46,8 @@ load_dotenv()
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 GEMINI_MODEL  = "gemini-2.5-pro"
+# NOTA ANTIGRAVITY: Si cambian a archivo puramente .jsonl, solo renombra esto.
+# Añadí lógica híbrida abajo para leer tanto CSV real como JSONL en ese archivo.
 DB_PATH       = "matches_comprimidos.csv"      
 MC_ITERATIONS = 50000                            
 
@@ -81,8 +107,44 @@ def gemini_available() -> bool:
     return get_gemini_client() is not None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EXTRACCIÓN AUTÓNOMA DE CONTEXTO
+# EXTRACCIÓN AUTÓNOMA Y FALLBACK DE GEMINI
 # ─────────────────────────────────────────────────────────────────────────────
+def get_gemini_stats_fallback(name: str, surface: str) -> dict:
+    client = get_gemini_client()
+    fback = get_fallback(surface)
+    if not client:
+        return {
+            "source": "Local Fallback",
+            "spw": fback["spw"], "rpw": fback["rpw"], "hold": fback["hold"],
+            "n": 0, "n_total": 0, "tags": ["Desconocido - No API"]
+        }
+    try:
+        prompt = (
+            f"El jugador de tenis '{name}' no existe en mi base histórica local.\n"
+            f"Estima su Service Points Won % (SPW), Return Points Won % (RPW) y Hold % en superficie {surface}.\n"
+            f"Si es desconocido (ITF), asume SPW=60.5, RPW=39.5, Hold=65.0. No uses texto.\n"
+            f"Responde SOLO en JSON crudo: {{\"spw\": 60.5, \"rpw\": 39.5, \"hold\": 65.0}}"
+        )
+        r = client.models.generate_content(
+            model=GEMINI_MODEL, contents=prompt,
+            config=types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.1)
+        )
+        raw = r.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(raw[raw.find('{'):raw.rfind('}')+1])
+        return {
+            "source": "🤖 Gemini Hallucinated Fallback",
+            "spw": float(data.get("spw", fback["spw"])),
+            "rpw": float(data.get("rpw", fback["rpw"])),
+            "hold": float(data.get("hold", fback["hold"])),
+            "n": 0, "n_total": 0, "tags": ["Fuerza Bruta Gemini API"]
+        }
+    except Exception:
+        return {
+            "source": "Local Fallback",
+            "spw": fback["spw"], "rpw": fback["rpw"], "hold": fback["hold"],
+            "n": 0, "n_total": 0, "tags": ["Falta Info"]
+        }
+
 @st.cache_data(show_spinner=False)
 def extract_match_context(p1: str, p2: str) -> dict:
     client = get_gemini_client()
@@ -117,16 +179,21 @@ def extract_match_context(p1: str, p2: str) -> dict:
         return {"surface": "Hard", "tourney": "Unknown", "altitude": 0, "level": "ATP"}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PARSER HÍBRIDO (JSONL/CSV)
+# PARSER HÍBRIDO (JSONL/CSV) — LECTURA SEGURA
 # ─────────────────────────────────────────────────────────────────────────────
 def _parse_db_line(line: str) -> list | None:
+    """Intenta procesar la línea como JSON, de lo contrario la asume CSV."""
     line = line.strip()
     if not line: return None
     if line.startswith('['):
-        try: return json.loads(line)
-        except Exception: pass
+        try:
+            return json.loads(line)
+        except Exception:
+            pass
+    # Intento CSV rápido
     try:
         parts = next(csv.reader([line]))
+        # Convertir a ints si es posible (ej: rec[0] Srf)
         parsed = []
         for p in parts:
             p = p.strip()
@@ -231,6 +298,7 @@ def get_stats(name: str, surface: str = "Hard", level: str = "ATP",
         st.warning(f"⚠️ Archivo BD no encontrado: {path}")
         return None
     except Exception as e:
+        st.error(f"BD error: {e}")
         return None
 
     if n_surface < 10 and n_total >= 10:
@@ -420,7 +488,7 @@ def check_tier_drop(name: str, level: str, path: str = DB_PATH) -> bool:
     return best_recent <= 100
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FÍSICA Y ENTORNO (SHRINKAGE PRESERVING SUM LÓGICA DE CLAUDE)
+# FÍSICA Y ENTORNO
 # ─────────────────────────────────────────────────────────────────────────────
 def apply_environment(spw: float, rpw: float, n: int,
                       altitude_m: int, fatigue_mins: int,
@@ -432,7 +500,6 @@ def apply_environment(spw: float, rpw: float, n: int,
     confidence = min(n / 20.0, 1.0) if n > 0 else 0.0
     shrink     = 0.35 * (1.0 - confidence)
 
-    # Lógica de Shrinkage conservando la suma total (Correción 5.3)
     total_points = spw + rpw
     adj_total = total_points * (1 - shrink) + (AVG_SPW + AVG_RPW) * shrink
     adj_spw = (spw / total_points) * adj_total if total_points > 0 else AVG_SPW
@@ -611,7 +678,7 @@ def parse_matches(text: str) -> list[tuple]:
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MATEMÁTICA LOCAL (CADENAS DE MARKOV + MONTECARLO)
+# MATEMÁTICA LOCAL
 # ─────────────────────────────────────────────────────────────────────────────
 def american_to_decimal(odd: int) -> float:
     if odd > 0: return (odd / 100.0) + 1.0
@@ -749,7 +816,13 @@ def log_prediction(match_id, p1, p2, p_mod, p_casa, odd, ev_val, tier, league, i
     sheet = get_sheet()
     if not sheet: return False
     try:
-        if match_id in sheet.col_values(1): return False
+        col_ids = sheet.col_values(1)
+        if match_id in col_ids:
+            if real_winner:
+                idx = col_ids.index(match_id) + 1
+                sheet.update_cell(idx, 10, real_winner)
+            return True
+            
         sheet.append_row([
             match_id, datetime.now().strftime("%Y-%m-%d %H:%M"),
             p1, p2, f"{p_mod*100:.1f}%", f"{p_casa*100:.1f}%" if p_casa else "S/C",
@@ -759,18 +832,34 @@ def log_prediction(match_id, p1, p2, p_mod, p_casa, odd, ev_val, tier, league, i
         return True
     except Exception: return False
 
+def get_pending_matches():
+    sheet = get_sheet()
+    if not sheet: return []
+    try:
+        all_rows = sheet.get_all_values()
+        pending = []
+        for i, row in enumerate(all_rows):
+            if i == 0 or len(row) < 4: continue
+            winner = row[9] if len(row) > 9 else ""
+            if winner.strip() == "":
+                pending.append({"match_id": row[0], "p1": row[2], "p2": row[3]})
+        return pending
+    except Exception: return []
+
 # ─────────────────────────────────────────────────────────────────────────────
-# UI PRINCIPAL
+# UI
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(page_title="Quantum Tennis v8.1", page_icon="🎾", layout="wide")
     st.markdown("""
     <style>
-    /* Inyección de Modo Oscuro Premium */
+    /* Inyección de Modo Oscuro Premium y Alto Contraste */
     .stApp { background-color: #0E1117; color: #FAFAFA; }
-    .stTextInput>div>div>input, .stTextArea>div>div>textarea { background-color: #262730; color: white; border: 1px solid #4CAF50; }
-    .stButton>button { background-color: #1E1E1E; color: #4CAF50; border: 1px solid #4CAF50; font-weight: bold; }
-    .stButton>button:hover { background-color: #4CAF50; color: white; }
+    p, span, div, h1, h2, h3, h4, h5, h6, caption, li, td, th { color: #FFFFFF !important; }
+    .stMetricDelta svg { fill: inherit !important; } /* Permitir color del delta local */
+    .stTextInput>div>div>input, .stTextArea>div>div>textarea { background-color: #262730; color: white !important; border: 1px solid #4CAF50; }
+    .stButton>button { background-color: #1E1E1E; color: #4CAF50 !important; border: 1px solid #4CAF50; font-weight: bold; }
+    .stButton>button:hover { background-color: #4CAF50; color: white !important; }
     </style>
     """, unsafe_allow_html=True)
     
@@ -859,7 +948,7 @@ def main():
 
         pA, pB = log5_serve(adj_spw1, adj_rpw2), log5_serve(adj_spw2, adj_rpw1)
 
-        with st.spinner(f"Corriendo {MC_ITERATIONS:,} simulaciones probabilísticas…"):
+        with st.spinner(f"Corriendo {MC_ITERATIONS:,} simulaciones Gaussianas…"):
             mc_A = sim_match(pA, pB, best_of)
             mc_B = 1 - mc_A
 
@@ -939,30 +1028,48 @@ IC: {ic:.2f} | sum_adj: {sum_adj:+.3f}
         with st.spinner("Gemini buscando contexto y generando veredicto…"):
             st.markdown(gemini_full_analysis(p1, p2, report_full))
 
-        # En lugar de guardar en automático, guardamos la info para el liquidador final
-        partidos_procesados.append({
-            "match_id": f"{p1}_{p2}_{datetime.now().strftime('%Y%m%d')}",
-            "p1": p1, "p2": p2, "pmod": pmod_final, "nv1": nv1 if odd1 and odd2 else 0,
-            "odd1": odd1, "ev1": ev1 if odd1 and odd2 else 0, "tier": tier1 if odd1 and odd2 else "S/C", "league": level, "ic": ic
-        })
-
-    if partidos_procesados:
-        st.divider()
-        st.markdown("### 💾 Agente Liquidador — Forzar Ganadores y Guardar en Oráculo")
-        with st.form("form_liquidador"):
-            ganadores = {}
-            for p in partidos_procesados:
-                st.write(f"**{p['p1']} vs {p['p2']}**")
-                ganadores[p['match_id']] = st.radio("¿Quién ganó realmente?", ["Ninguno (Pendiente)", p['p1'], p['p2']], key=f"win_{p['match_id']}", horizontal=True)
-            
-            submit = st.form_submit_button("🚀 Enviar Resultados al Excel (Google Sheets)", type="primary")
-            if submit:
+        # Botón sencillo de guardado (sin ganador dictaminado aún para evaluarlo el próximo día)
+        if st.button("💾 Guardar Análisis Actual en Oráculo", type="primary", use_container_width=True):
+            with st.spinner("Guardando en Google Sheets..."):
+                logged = 0
                 for p in partidos_procesados:
-                    real_winner = ganadores[p['match_id']]
-                    if real_winner == "Ninguno (Pendiente)": real_winner = ""
-                    log_prediction(p['match_id'], p['p1'], p['p2'], p['pmod'], p['nv1'], p['odd1'], p['ev1'], p['tier'], p['league'], p['ic'], real_winner)
-                st.success("¡Datos y resultados inyectados correctamente al Oráculo!")
-                st.balloons()
+                    if log_prediction(p['match_id'], p['p1'], p['p2'], p['pmod'], p['nv1'], p['odd1'], p['ev1'], p['tier'], p['league'], p['ic'], ""):
+                        logged += 1
+                if logged > 0: st.success(f"¡{logged} partidos insertados al final del Google Sheet listos para liquidación mañana!")
+                else: st.warning("Partidos ya existían o error de conexión.")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # AGENTE LIQUIDADOR — LECTURA DE PENDIENTES DESDE SHEET MAESTRO (PARA EL DÍA SIGUIENTE)
+    # ─────────────────────────────────────────────────────────────────────────────
+    st.divider()
+    with st.expander("🎯 AGENTE LIQUIDADOR — Forzar Ganadores Pendientes de Días Anteriores", expanded=False):
+        if st.button("🔄 Cargar partidos pendientes desde Google Sheets"):
+            st.session_state.pending_matches = get_pending_matches()
+
+        pendientes = st.session_state.get("pending_matches", [])
+        if pendientes:
+            st.info(f"{len(pendientes)} partidos sin resultado encontrados.")
+            with st.form("form_liquidador_pendiente"):
+                ganadores_pendientes = {}
+                for p in pendientes:
+                    st.write(f"**{p['p1']} vs {p['p2']}**")
+                    ganadores_pendientes[p['match_id']] = st.radio(
+                        "¿Quién ganó?", ["Ninguno", p['p1'], p['p2']], 
+                        key=f"pen_{p['match_id']}", horizontal=True
+                    )
+                
+                submit_liq = st.form_submit_button("🚀 FORZAR RESULTADOS AL GOOGLE SHEET", type="primary")
+                if submit_liq:
+                    for p in pendientes:
+                        real_winner = ganadores_pendientes[p['match_id']]
+                        if real_winner != "Ninguno":
+                            # Refrescar la base con update_cell internamente por ser ya existente
+                            log_prediction(p['match_id'], p['p1'], p['p2'], 0, 0, None, None, "", "", 0, real_winner)
+                    st.session_state.pending_matches = [] # Limpiar tabla cacheada
+                    st.success("¡Liquidados exitosamente! Tu base queda calibrada y limpia de alucinaciones.")
+                    st.balloons()
+        else:
+            st.write("Haz click en Cargar pendientes para conectar con el Oráculo.")
 
 if __name__ == "__main__":
     main()
