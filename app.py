@@ -1270,8 +1270,15 @@ def main():
         tourney = ctx.get("tourney", "Unknown")
         altitude = ctx.get("altitude", 0)
         level = ctx.get("level", league)
-        p1_hnd, p1_hgt, p1_t100, p1_loc = ctx["p1_hand"], ctx["p1_height"], ctx["p1_top100"], ctx["p1_local"]
-        p2_hnd, p2_hgt, p2_t100, p2_loc = ctx["p2_hand"], ctx["p2_height"], ctx["p2_top100"], ctx["p2_local"]
+        p1_hnd = ctx.get("p1_hand", "R")
+        p1_hgt = ctx.get("p1_height", 185)
+        p1_t100 = ctx.get("p1_top100", True)
+        p1_loc = ctx.get("p1_local", False)
+        
+        p2_hnd = ctx.get("p2_hand", "R")
+        p2_hgt = ctx.get("p2_height", 185)
+        p2_t100 = ctx.get("p2_top100", True)
+        p2_loc = ctx.get("p2_local", False)
 
         st.caption(f"📍 {tourney} | {surface} | {level} | Alt: {altitude}m | P1: {p1_hgt}cm ({p1_hnd}) vs P2: {p2_hgt}cm ({p2_hnd})")
 
