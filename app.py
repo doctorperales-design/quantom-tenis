@@ -794,11 +794,11 @@ def log_prediction(match_id, p1, p2, p_mod, p_casa, odd, ev_val, tier, league, i
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(page_title="Quantum Tennis v8.1", page_icon="🎾", layout="wide")
-    st.title("🎾 Quantum Tennis Engine v8.1 — Math Audit Edition")
-    st.caption("Motor Log5+Monte Carlo · Oráculo Extensor 2022-2024 · Filtros y Shrinkage Dinámico")
+    st.title("🎾 Quantum Tennis Engine v8.1 — Oráculo Math Audit Edition")
+    st.caption("Motor local (Log5 · Markov MC 50k) · Oráculo 40k+ registros (2022-2024) · Filtros Nivel/Superficie/Fecha · H2H · Clutch · DR · Fatiga · Court Pace · Gemini 2.5 Pro Search Grounding")
 
     if not gemini_available():
-        st.error("⚠️ Falta GOOGLE_API_KEY")
+        st.error("⚠️ Falta GOOGLE_API_KEY en tu archivo .env")
         st.stop()
 
     if "txt" not in st.session_state: st.session_state.txt = ""
@@ -811,7 +811,7 @@ def main():
             st.session_state.txt = ""
             st.rerun()
 
-    txt = st.text_area("📋 Pega los partidos:", key="txt", height=160, placeholder="Alcaraz C\nSinner J\n-140\n+110")
+    txt = st.text_area("📋 Pega los partidos (formato Caliente o 'Sinner -120 vs Alcaraz +100'):", key="txt", height=160, placeholder="Alcaraz C\nSinner J\n-140\n+110")
 
     if not st.button("🚀 Analizar", type="primary", use_container_width=True): return
     if not txt.strip():
@@ -889,19 +889,25 @@ def main():
         ]:
             col.markdown(f"**{name}**")
             tag_str = " · ".join(stats.get("tags", [])) if stats.get("tags") else ""
-            col.caption(f"Fuente: {stats['source']} · n={stats['n']} (sup) / {stats.get('n_total', stats['n'])} (tot) · SPW {stats['spw']}% → {adj_spw:.1f}% · RPW {stats['rpw']}% → {adj_rpw:.1f}% · Hold {stats['hold']}% · Clutch {stats.get('clutch', 0):.0f} · DR5 {stats.get('dr_last5', 0):.3f}" + (f" · ⚠️ {tag_str}" if tag_str else ""))
-            col.metric("P(srv/punto)", f"{p_srv*100:.1f}%")
-            col.metric("P(match)", f"{mc_w*100:.1f}%")
+            col.caption(
+                f"Fuente: {stats['source']} · n={stats['n']} (sup) / {stats.get('n_total', stats['n'])} (total) · "
+                f"SPW {stats['spw']}% → {adj_spw:.1f}% · RPW {stats['rpw']}% → {adj_rpw:.1f}% · "
+                f"Hold {stats['hold']}% · Clutch {stats.get('clutch', 0):.0f} · DR5 {stats.get('dr_last5', 0):.3f}"
+                + (f" · ⚠️ {tag_str}" if tag_str else "")
+            )
+            col.metric("P(srv/punto) Log5", f"{p_srv*100:.1f}%")
+            col.metric("P(match) Modelo", f"{mc_w*100:.1f}%")
 
             if odd:
                 nv1, nv2, f1, f2 = no_vig(odd1 or 100, odd2 or 100)
-                nv_this, fair = (nv1, f1) if col is m1 else (nv2, f2)
+                nv_this = nv1 if col is m1 else nv2
+                fair    = f1  if col is m1 else f2
                 dec_odd = american_to_decimal(odd)
-                ev_val = calc_ev(mc_w, dec_odd)
-                edge = (mc_w - nv_this) * 100
+                ev_val  = calc_ev(mc_w, dec_odd)
+                edge    = (mc_w - nv_this) * 100
                 tier, emoji = classify(mc_w, ev_val * 100, dec_odd)
 
-                col.metric("P(Casa) No-Vig", f"{nv_this*100:.1f}%", f"Fair {fair}", delta_color="off")
+                col.metric("P(match) Casa No-Vig", f"{nv_this*100:.1f}%", f"Fair odd {fair}", delta_color="off")
                 col.metric("💰 Expected Value", f"{ev_val*100:+.1f}%", delta_color="normal" if ev_val > 0 else "inverse")
                 col.metric("Edge vs Casa", f"{edge:+.1f}%")
                 if col is m1: ev_lines.append(f"{name}: EV={ev_val*100:+.2f}% | Edge={edge:+.1f}% | {tier} {emoji}")
@@ -914,16 +920,39 @@ def main():
             tier1, emoji1 = classify(pmod_final, ev1 * 100, dec1)
             nv1, _, _, _ = no_vig(odd1, odd2)
 
-            st.markdown(f"#### 📊 Salida Quantum Engine\n| Campo | Valor |\n|---|---|\n| **Partido** | {p1} vs {p2} |\n| **Torneo** | {tourney} ({level}) |\n| **Cancha** | {surface} |\n| **Pmod** | {pmod_final*100:.1f}% |\n| **EV** | {ev1*100:+.1f}% |\n| **STATUS** | {tier1} {emoji1} |")
-            with st.expander("🔧 Ajustes aplicados"):
+            st.markdown(f"""
+#### 📊 Salida Quantum Engine
+
+| Campo | Valor |
+|---|---|
+| **Partido** | {p1} vs {p2} |
+| **Torneo** | {tourney} ({level}) |
+| **Superficie** | {surface} |
+| **Pmod (Real Prob)** | {pmod_final*100:.1f}% |
+| **Implied Obj (Cuota)** | {nv1*100:.1f}% |
+| **EV Edge** | {ev1*100:+.1f}% |
+| **IC Confianza** | {ic:.2f} {' '.join('['+t+']' for t in s1.get('tags',[]))} |
+| **STATUS FINAL** | {tier1} {emoji1} |
+| **TANKING CHECK** | {'⚠️ SÍ' if tank_p1 else 'NO'} ({p1}) \| {'⚠️ SÍ' if tank_p2 else 'NO'} ({p2}) |
+| **H2H reciente** | {h2h['p1_wins']}-{h2h['p2_wins']} ({h2h['total']} partidos ≤36m) |
+""")
+            with st.expander("🔧 Ajustes aplicados al modelo"):
                 for note in adj_notes + env_notes1 + env_notes2: st.write(f"• {note}")
                 st.write(f"**sum_adj total: {sum_adj:+.3f}**")
             log_prediction(f"{p1}_{p2}_{datetime.now().strftime('%Y%m%d')}", p1, p2, pmod_final, nv1, odd1, ev1, tier1, level, ic)
 
-        st.markdown("#### 🤖 Gemini — Conclusión")
-        report = f"{p1}/{p2} → P(MC): {pmod_final*100:.1f}% / {(1-pmod_final)*100:.1f}%. H2H: {h2h['p1_wins']}-{h2h['p2_wins']}. IC: {ic:.2f}"
-        with st.spinner("Generando veredicto…"):
-            st.markdown(gemini_full_analysis(p1, p2, report))
+        st.markdown("#### 🤖 Gemini — Análisis H48 + Veredicto")
+        report_full = f"""
+{p1}: SPW={s1['spw']}%→{adj_spw1:.1f}% RPW={s1['rpw']}%→{adj_rpw1:.1f}% Hold={s1['hold']}% (n={s1['n']}, {s1['source']})
+{p2}: SPW={s2['spw']}%→{adj_spw2:.1f}% RPW={s2['rpw']}%→{adj_rpw2:.1f}% Hold={s2['hold']}% (n={s2['n']}, {s2['source']})
+Log5: {p1}={pA:.3f} | {p2}={pB:.3f}
+Monte Carlo ({MC_ITERATIONS} iter, Bo{best_of}): {p1}={pmod_final*100:.1f}% | {p2}={(1-pmod_final)*100:.1f}%
+H2H: {h2h['p1_wins']}-{h2h['p2_wins']} (≤36m)
+{chr(10).join(ev_lines) if ev_lines else 'Sin cuotas'}
+IC: {ic:.2f} | sum_adj: {sum_adj:+.3f}
+"""
+        with st.spinner("Gemini buscando contexto y generando veredicto…"):
+            st.markdown(gemini_full_analysis(p1, p2, report_full))
 
 if __name__ == "__main__":
     main()
