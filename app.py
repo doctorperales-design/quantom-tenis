@@ -163,17 +163,23 @@ def load_oracle(path: str) -> list[list]:
 @st.cache_data(show_spinner=False)
 def extract_match_context(p1: str, p2: str) -> dict:
     client = get_gemini_client()
-    default = {"surface": "Hard", "tourney": "Unknown", "altitude": 0, "level": "ATP"}
+    default = {
+        "surface": "Hard", "tourney": "Unknown", "altitude": 0, "level": "ATP",
+        "p1_hand": "R", "p1_height": 185, "p1_local": False,
+        "p2_hand": "R", "p2_height": 185, "p2_local": False
+    }
     if not client:
         return default
     try:
         prompt = (
-            f'Detecta el torneo actual, la superficie (Hard, Clay, Grass, Carpet), '
-            f'el nivel del circuito (ATP, Masters, GrandSlam, Challenger, ITF, DavisCup, Finals) '
-            f'y la altitud en metros sobre el nivel del mar para el partido de tenis entre '
-            f'"{p1}" y "{p2}" programado para las próximas 48 horas.\n'
+            f'Investiga el partido de tenis entre "{p1}" (P1) y "{p2}" (P2).\n'
+            f'Detecta 4 cosas crudas:\n'
+            f'1. Torneo, superficie (Hard, Clay, Grass, Carpet), nivel (ATP/Masters/GrandSlam/Challenger/ITF), altitud en metros.\n'
+            f'2. Mano Dominante de ambos (L para Zurdo, R para Diestro).\n'
+            f'3. Estatura (altura) de ambos en cm (entero).\n'
+            f'4. Localía: ¿Algún jugador es de la misma nacionalidad/país sede del torneo? (True/False).\n'
             f'Responde SOLO con JSON crudo:\n'
-            f'{{"surface": "Hard", "tourney": "Monte Carlo Masters", "altitude": 35, "level": "Masters"}}'
+            f'{{"surface": "Hard", "tourney": "Monte Carlo", "altitude": 35, "level": "Masters", "p1_hand": "R", "p1_height": 185, "p1_local": false, "p2_hand": "L", "p2_height": 198, "p2_local": true}}'
         )
         r = client.models.generate_content(
             model=GEMINI_MODEL, contents=prompt,
@@ -189,6 +195,9 @@ def extract_match_context(p1: str, p2: str) -> dict:
             if lvl not in LEVEL_GROUPS:
                 lvl = "ATP"
             data["level"] = lvl
+            for k, v in default.items():
+                if k not in data:
+                    data[k] = v
             return data
     except Exception:
         pass
@@ -605,16 +614,53 @@ def apply_environment(spw: float, rpw: float, n: int,
 # ─────────────────────────────────────────────────────────────────────────────
 # FASE CERO: AJUSTES DINÁMICOS — BUG #2 FIX (sin fatiga aquí)
 # ─────────────────────────────────────────────────────────────────────────────
-def compute_adjustments(s1: dict, s2: dict, h2h: dict) -> tuple[float, float, list]:
+def compute_adjustments(s1: dict, s2: dict, h2h: dict, ctx: dict = None) -> tuple[float, float, list]:
     """
     BUG #2 FIX: Fatiga ELIMINADA de aquí (ya está en apply_environment).
-    Solo quedan ajustes de IC y sum_adj por H2H, DR, Clutch y tags.
+    Se restauran Ajustes V7 (Zurdo, Altura, Clay Trap) 100% automáticos vía ctx.
     """
     sum_adj = 0.0
     ic = 1.00
     notes = []
+    
+    # ── Ajustes Físicos (Restauración V7) ──
+    if ctx:
+        p1_h = ctx.get("p1_hand", "R")
+        p2_h = ctx.get("p2_hand", "R")
+        p1_ht = ctx.get("p1_height", 0)
+        p2_ht = ctx.get("p2_height", 0)
+        p1_l = ctx.get("p1_local", False)
+        p2_l = ctx.get("p2_local", False)
+        surf = ctx.get("surface", "Hard")
+        lvl = ctx.get("level", "ATP")
 
-    # Tags (MUESTRA MIXTA, FALLBACK, FUENTE WEB)
+        # Factor Zurdo
+        if p2_h == "L" and p1_h != "L":
+            sum_adj -= 0.05
+            notes.append("Factor V3: Oponente (P2) es Zurdo → -0.05")
+        if p1_h == "L" and p2_h != "L":
+            sum_adj += 0.05
+            notes.append("Factor V3: P1 es Zurdo → +0.05")
+
+        # Altura en pistas rápidas (Hard/Grass/Carpet)
+        if surf in ["Hard", "Grass", "Carpet"]:
+            if isinstance(p1_ht, (int, float)) and p1_ht > 193:
+                sum_adj += 0.03
+                notes.append(f"Ajuste Físico: P1 alto ({p1_ht}cm) en {surf} → +0.03")
+            if isinstance(p2_ht, (int, float)) and p2_ht > 193:
+                sum_adj -= 0.03
+                notes.append(f"Ajuste Físico: P2 alto ({p2_ht}cm) en {surf} → -0.03")
+
+        # Clay Trap (Local en Arcilla de torneos menores)
+        if surf == "Clay" and lvl in ["Challenger", "ITF"]:
+            if p2_l:
+                sum_adj -= 0.06
+                notes.append("Clay Trap: P2 es Local en Challenger arcilla → -0.06")
+            if p1_l:
+                sum_adj += 0.06
+                notes.append("Clay Trap: P1 es Local en Challenger arcilla → +0.06")
+
+    # ── Tags (MUESTRA MIXTA, FALLBACK, FUENTE WEB) ──
     for tag in s1.get("tags", []) + s2.get("tags", []):
         if "MIXTA" in tag and ic > 0.85:
             ic -= 0.05
@@ -1217,14 +1263,17 @@ def main():
         st.subheader(f"⚡ {p1}  vs  {p2}")
 
         # ── Contexto ─────────────────────────────────────────────────────────
-        with st.spinner("🌍 Detectando torneo…"):
+        with st.spinner("🌍 Detectando torneo y físico…"):
             ctx = extract_match_context(p1, p2)
 
         surface = ctx.get("surface", "Hard")
         tourney = ctx.get("tourney", "Unknown")
         altitude = ctx.get("altitude", 0)
         level = ctx.get("level", league)
-        st.caption(f"📍 {tourney} | {surface} | {level} | Alt: {altitude}m")
+        p1_hnd, p1_hgt, p1_t100, p1_loc = ctx["p1_hand"], ctx["p1_height"], ctx["p1_top100"], ctx["p1_local"]
+        p2_hnd, p2_hgt, p2_t100, p2_loc = ctx["p2_hand"], ctx["p2_height"], ctx["p2_top100"], ctx["p2_local"]
+
+        st.caption(f"📍 {tourney} | {surface} | {level} | Alt: {altitude}m | P1: {p1_hgt}cm ({p1_hnd}) vs P2: {p2_hgt}cm ({p2_hnd})")
 
         # Tier Drop
         if check_tier_drop(p1, level, oracle):
@@ -1256,7 +1305,7 @@ def main():
         tank_p2 = check_tanking(p2, oracle)
 
         # ── Ajustes ──────────────────────────────────────────────────────────
-        sum_adj, ic, adj_notes = compute_adjustments(s1, s2, h2h)
+        sum_adj, ic, adj_notes = compute_adjustments(s1, s2, h2h, ctx)
 
         adj_spw1, adj_rpw1, env1 = apply_environment(
             s1["spw"], s1["rpw"], s1["n"], altitude, s1["fatigue_mins"], surface, tourney
@@ -1352,7 +1401,7 @@ def main():
 | **H2H reciente** | {h2h['p1_wins']}-{h2h['p2_wins']} ({h2h['total']} partidos ≤36m) |
 """)
 
-            with st.expander("🔧 Ajustes aplicados"):
+            with st.expander("🔧 Ajustes Dinámicos (Físicos V7 + Matemática)"):
                 for note in adj_notes + env1 + env2:
                     st.write(f"• {note}")
                 st.write(f"**sum_adj total: {sum_adj:+.3f}**")
