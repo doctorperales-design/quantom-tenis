@@ -55,6 +55,28 @@ DB_PATH       = "matches_comprimidos.csv"
 MC_ITERATIONS = 10000  # BUG #3 FIX: 50k→10k. Error estándar ~0.5% (suficiente para EV)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CONSTANTES DE AJUSTE (antes magic numbers)
+# ─────────────────────────────────────────────────────────────────────────────
+ADJ_LEFTY         = 0.05
+ADJ_HEIGHT_FAST   = 0.03
+ADJ_CLAY_TRAP     = 0.06
+ADJ_H2H_DOMINANT  = 0.03
+ADJ_DR_HOT        = 0.04
+ADJ_DR_COLD       = 0.04
+ADJ_CLUTCH        = 0.05
+ADJ_WEB_SOURCE    = 0.03
+IC_PENALTY_MIXED  = 0.05
+IC_PENALTY_FALLBACK = 0.15
+COURT_PACE_PP     = 1.5
+SHRINKAGE_BASE    = 0.35
+SHRINKAGE_THRESHOLD = 20
+SPW_FLOOR         = 30.0
+SPW_CEIL          = 85.0
+RPW_FLOOR         = 25.0
+RPW_CEIL          = 60.0
+HEIGHT_THRESHOLD  = 193
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FALLBACKS EMPÍRICOS — 40,225 registros (2022-2024)
 # ─────────────────────────────────────────────────────────────────────────────
 SURFACE_FALLBACKS = {
@@ -416,9 +438,13 @@ def get_stats(name: str, surface: str, level: str, oracle: list[list]) -> dict |
 
 def _get_stats_all_surfaces(name: str, level: str, oracle: list[list],
                             mixed_sample: bool = False) -> dict | None:
+    """BUG #12 FIX: Ahora calcula clutch, DR y fatigue correctamente."""
     allowed_levels = LEVEL_GROUPS.get(level, {1, 2, 3, 4})
     sv_pts = sv_won = sv_gms = sv_held = 0
     rt_pts = rt_won = rt_gms = rt_brk = 0
+    bp_saved_total = bp_faced_total = bp_conv_won = bp_conv_total = 0
+    recent_minutes = []
+    recent_results = []
     n = 0
 
     for rec in oracle:
@@ -429,6 +455,9 @@ def _get_stats_all_surfaces(name: str, level: str, oracle: list[list],
             continue
         if _safe_int(rec[1]) not in allowed_levels:
             continue
+
+        rec_date = _safe_int(rec[20]) if len(rec) > 20 else 0
+        rec_mins = _safe_int(rec[21]) if len(rec) > 21 else 0
 
         if is_w:
             wp = (_safe_int(rec[6]), _safe_int(rec[8]), _safe_int(rec[9]),
@@ -449,7 +478,19 @@ def _get_stats_all_surfaces(name: str, level: str, oracle: list[list],
         rt_won += max(0, lp[0] - (lp[1] + lp[2]))
         rt_gms += lp[3]
         rt_brk += max(0, lp[5] - lp[4])
+        bp_saved_total += wp[4]
+        bp_faced_total += wp[5]
+        bp_conv_won += max(0, lp[5] - lp[4])
+        bp_conv_total += lp[5]
         n += 1
+
+        if rec_mins > 0 and rec_date > 0:
+            recent_minutes.append((rec_date, rec_mins))
+        if wp[0] > 0 and lp[0] > 0:
+            my_spw = (wp[1] + wp[2]) / wp[0]
+            opp_spw = (lp[1] + lp[2]) / lp[0]
+            if opp_spw > 0:
+                recent_results.append((rec_date, my_spw / opp_spw, is_w))
 
     if n == 0:
         if level != "ITF":
@@ -458,6 +499,20 @@ def _get_stats_all_surfaces(name: str, level: str, oracle: list[list],
 
     spw = max(25.1, sv_won / sv_pts * 100 if sv_pts else 55.0)
     rpw = max(25.1, rt_won / rt_pts * 100 if rt_pts else 40.0)
+    hold = sv_held / sv_gms * 100 if sv_gms else 0
+    brk = rt_brk / rt_gms * 100 if rt_gms else 0
+
+    bp_saved_pct = (bp_saved_total / bp_faced_total * 100) if bp_faced_total > 0 else 50.0
+    bp_conv_pct = (bp_conv_won / bp_conv_total * 100) if bp_conv_total > 0 else 40.0
+    clutch = bp_saved_pct + bp_conv_pct
+
+    recent_results.sort(key=lambda x: x[0], reverse=True)
+    last5_dr = [r[1] for r in recent_results[:5]]
+    avg_dr = sum(last5_dr) / len(last5_dr) if last5_dr else 1.0
+    last5_wins = sum(1 for r in recent_results[:5] if r[2])
+
+    recent_minutes.sort(key=lambda x: x[0], reverse=True)
+    fatigue_mins = sum(m[1] for m in recent_minutes[:2]) if len(recent_minutes) >= 2 else 0
 
     tags = ["MUESTRA MIXTA"]
     if n < 10:
@@ -465,11 +520,11 @@ def _get_stats_all_surfaces(name: str, level: str, oracle: list[list],
 
     return {
         "n": n, "n_total": n,
-        "hold": round(sv_held / sv_gms * 100, 1) if sv_gms else 0,
-        "brk": round(rt_brk / rt_gms * 100, 1) if rt_gms else 0,
+        "hold": round(hold, 1), "brk": round(brk, 1),
         "spw": round(spw, 1), "rpw": round(rpw, 1),
-        "clutch": 100.0, "dr_last5": 1.0, "last5_wins": 0,
-        "fatigue_mins": 0, "tags": tags, "source": "Oráculo Local (mixta)",
+        "clutch": round(clutch, 1), "dr_last5": round(avg_dr, 3),
+        "last5_wins": last5_wins, "fatigue_mins": fatigue_mins,
+        "tags": tags, "source": "Oráculo Local (mixta)",
     }
 
 
@@ -562,20 +617,31 @@ def check_tier_drop(name: str, level: str, oracle: list[list]) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # FÍSICA Y ENTORNO — BUG #6 FIX (shrinkage independiente)
 # ─────────────────────────────────────────────────────────────────────────────
+def _clip_spw(val: float) -> float:
+    return max(SPW_FLOOR, min(SPW_CEIL, val))
+
+
+def _clip_rpw(val: float) -> float:
+    return max(RPW_FLOOR, min(RPW_CEIL, val))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FÍSICA Y ENTORNO — con clipping post-ajuste (BUG #14 FIX)
+# ─────────────────────────────────────────────────────────────────────────────
 def apply_environment(spw: float, rpw: float, n: int,
                       altitude_m: int, fatigue_mins: int,
                       surface: str, tourney: str = "") -> tuple[float, float, list]:
     """
-    BUG #6 FIX: Shrinkage independiente por métrica.
-    SPW y RPW se acercan a SUS respectivas medias, no de forma proporcional.
+    Shrinkage independiente + ajustes de entorno.
+    BUG #14 FIX: Clipping final para evitar valores absurdos.
     """
     fb = get_fallback(surface)
     AVG_SPW, AVG_RPW = fb["spw"], fb["rpw"]
     adjustments = []
 
-    # Shrinkage Bayesiano independiente (threshold 20 partidos)
-    confidence = min(n / 20.0, 1.0) if n > 0 else 0.0
-    shrink = 0.35 * (1.0 - confidence)
+    # Shrinkage Bayesiano independiente
+    confidence = min(n / float(SHRINKAGE_THRESHOLD), 1.0) if n > 0 else 0.0
+    shrink = SHRINKAGE_BASE * (1.0 - confidence)
 
     adj_spw = spw * (1 - shrink) + AVG_SPW * shrink
     adj_rpw = rpw * (1 - shrink) + AVG_RPW * shrink
@@ -590,40 +656,40 @@ def apply_environment(spw: float, rpw: float, n: int,
         adj_rpw -= alt_bonus * 0.5
         adjustments.append(f"Altitud +{alt_bonus:.2f} SPW ({altitude_m}m)")
 
-    # Court Pace (aditivo ±1.5 pp)
+    # Court Pace (aditivo)
     tourney_low = tourney.lower() if tourney else ""
     if any(t in tourney_low for t in FAST_COURTS):
-        adj_spw += 1.5
-        adj_rpw -= 1.5
+        adj_spw += COURT_PACE_PP
+        adj_rpw -= COURT_PACE_PP
         adjustments.append(f"Court Pace RÁPIDA ({tourney})")
     elif any(t in tourney_low for t in SLOW_COURTS):
-        adj_spw -= 1.5
-        adj_rpw += 1.5
+        adj_spw -= COURT_PACE_PP
+        adj_rpw += COURT_PACE_PP
         adjustments.append(f"Court Pace LENTA ({tourney})")
 
-    # Fatiga (BUG #2 FIX: ÚNICA ubicación de penalización de fatiga)
+    # Fatiga (ÚNICA ubicación)
     if fatigue_mins > 150:
         penalty = min((fatigue_mins - 150) / 100.0 * 0.5, 2.0)
         adj_spw -= penalty
         adj_rpw -= penalty * 0.3
         adjustments.append(f"Fatiga -{penalty:.2f} SPW ({fatigue_mins} min recientes)")
 
+    # BUG #14 FIX: Clipping
+    adj_spw = _clip_spw(adj_spw)
+    adj_rpw = _clip_rpw(adj_rpw)
+
     return adj_spw, adj_rpw, adjustments
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FASE CERO: AJUSTES DINÁMICOS — BUG #2 FIX (sin fatiga aquí)
+# FASE CERO: AJUSTES DINÁMICOS
 # ─────────────────────────────────────────────────────────────────────────────
-def compute_adjustments(s1: dict, s2: dict, h2h: dict, ctx: dict = None) -> tuple[float, float, list]:
-    """
-    BUG #2 FIX: Fatiga ELIMINADA de aquí (ya está en apply_environment).
-    Se restauran Ajustes V7 (Zurdo, Altura, Clay Trap) 100% automáticos vía ctx.
-    """
+def compute_adjustments(s1: dict, s2: dict, h2h: dict,
+                        ctx: dict = None) -> tuple[float, float, list]:
     sum_adj = 0.0
     ic = 1.00
     notes = []
-    
-    # ── Ajustes Físicos (Restauración V7) ──
+
     if ctx:
         p1_h = ctx.get("p1_hand", "R")
         p2_h = ctx.get("p2_hand", "R")
@@ -636,79 +702,85 @@ def compute_adjustments(s1: dict, s2: dict, h2h: dict, ctx: dict = None) -> tupl
 
         # Factor Zurdo
         if p2_h == "L" and p1_h != "L":
-            sum_adj -= 0.05
-            notes.append("Factor V3: Oponente (P2) es Zurdo → -0.05")
+            sum_adj -= ADJ_LEFTY
+            notes.append(f"Factor V3: Oponente (P2) es Zurdo → -{ADJ_LEFTY}")
         if p1_h == "L" and p2_h != "L":
-            sum_adj += 0.05
-            notes.append("Factor V3: P1 es Zurdo → +0.05")
+            sum_adj += ADJ_LEFTY
+            notes.append(f"Factor V3: P1 es Zurdo → +{ADJ_LEFTY}")
 
-        # Altura en pistas rápidas (Hard/Grass/Carpet)
+        # Altura en pistas rápidas
         if surf in ["Hard", "Grass", "Carpet"]:
-            if isinstance(p1_ht, (int, float)) and p1_ht > 193:
-                sum_adj += 0.03
-                notes.append(f"Ajuste Físico: P1 alto ({p1_ht}cm) en {surf} → +0.03")
-            if isinstance(p2_ht, (int, float)) and p2_ht > 193:
-                sum_adj -= 0.03
-                notes.append(f"Ajuste Físico: P2 alto ({p2_ht}cm) en {surf} → -0.03")
+            if isinstance(p1_ht, (int, float)) and p1_ht > HEIGHT_THRESHOLD:
+                sum_adj += ADJ_HEIGHT_FAST
+                notes.append(f"Ajuste Físico: P1 alto ({p1_ht}cm) en {surf} → +{ADJ_HEIGHT_FAST}")
+            if isinstance(p2_ht, (int, float)) and p2_ht > HEIGHT_THRESHOLD:
+                sum_adj -= ADJ_HEIGHT_FAST
+                notes.append(f"Ajuste Físico: P2 alto ({p2_ht}cm) en {surf} → -{ADJ_HEIGHT_FAST}")
 
-        # Clay Trap (Local en Arcilla de torneos menores)
+        # Clay Trap
         if surf == "Clay" and lvl in ["Challenger", "ITF"]:
             if p2_l:
-                sum_adj -= 0.06
-                notes.append("Clay Trap: P2 es Local en Challenger arcilla → -0.06")
+                sum_adj -= ADJ_CLAY_TRAP
+                notes.append(f"Clay Trap: P2 es Local en Challenger arcilla → -{ADJ_CLAY_TRAP}")
             if p1_l:
-                sum_adj += 0.06
-                notes.append("Clay Trap: P1 es Local en Challenger arcilla → +0.06")
+                sum_adj += ADJ_CLAY_TRAP
+                notes.append(f"Clay Trap: P1 es Local en Challenger arcilla → +{ADJ_CLAY_TRAP}")
 
-    # ── Tags (MUESTRA MIXTA, FALLBACK, FUENTE WEB) ──
+    # Tags
     for tag in s1.get("tags", []) + s2.get("tags", []):
         if "MIXTA" in tag and ic > 0.85:
-            ic -= 0.05
-            notes.append(f"[MUESTRA MIXTA] IC -0.05")
+            ic -= IC_PENALTY_MIXED
+            notes.append(f"[MUESTRA MIXTA] IC -{IC_PENALTY_MIXED}")
         if "FALLBACK" in tag:
-            ic -= 0.15
-            notes.append(f"[FALLBACK] IC -0.15")
+            ic -= IC_PENALTY_FALLBACK
+            notes.append(f"[FALLBACK] IC -{IC_PENALTY_FALLBACK}")
         if "WEB" in tag:
-            sum_adj -= 0.03
-            notes.append(f"[FUENTE WEB] sum_adj -0.03")
+            sum_adj -= ADJ_WEB_SOURCE
+            notes.append(f"[FUENTE WEB] sum_adj -{ADJ_WEB_SOURCE}")
 
     # Muestra pequeña
     if s1.get("n", 0) < 10 or s2.get("n", 0) < 10:
         ic = min(ic, 0.85)
-        notes.append(f"Muestra <10 en superficie → IC ≤ 0.85")
+        notes.append("Muestra <10 en superficie → IC ≤ 0.85")
 
     # H2H
     if h2h["total"] == 0:
         ic = min(ic, 0.90)
-        notes.append(f"H2H = 0 partidos → IC ≤ 0.90")
+        notes.append("H2H = 0 partidos → IC ≤ 0.90")
     elif h2h["total"] >= 3:
         ratio = h2h["p1_wins"] / h2h["total"]
         if ratio >= 0.7:
-            sum_adj += 0.03
-            notes.append(f"H2H dominante ({h2h['p1_wins']}-{h2h['p2_wins']}) → +0.03")
+            sum_adj += ADJ_H2H_DOMINANT
+            notes.append(f"H2H dominante ({h2h['p1_wins']}-{h2h['p2_wins']}) → +{ADJ_H2H_DOMINANT}")
         elif ratio <= 0.3:
-            sum_adj -= 0.03
-            notes.append(f"H2H desfavorable ({h2h['p1_wins']}-{h2h['p2_wins']}) → -0.03")
+            sum_adj -= ADJ_H2H_DOMINANT
+            notes.append(f"H2H desfavorable ({h2h['p1_wins']}-{h2h['p2_wins']}) → -{ADJ_H2H_DOMINANT}")
 
     # Dominance Ratio
     dr1 = s1.get("dr_last5", 1.0)
     wins1 = s1.get("last5_wins", 0)
     if dr1 > 1.25:
-        sum_adj += 0.04
-        notes.append(f"DR últimos 5 = {dr1:.3f} → +0.04")
+        sum_adj += ADJ_DR_HOT
+        notes.append(f"DR últimos 5 = {dr1:.3f} → +{ADJ_DR_HOT}")
     if wins1 <= 1:
-        sum_adj -= 0.04
-        notes.append(f"Solo {wins1}/5 victorias recientes → -0.04")
+        sum_adj -= ADJ_DR_COLD
+        notes.append(f"Solo {wins1}/5 victorias recientes → -{ADJ_DR_COLD}")
 
     # Clutch Differential
     c1 = s1.get("clutch", 100.0)
     c2 = s2.get("clutch", 100.0)
     if c1 > 110 and c2 < 90:
-        sum_adj += 0.05
-        notes.append(f"Clutch ventaja ({c1:.0f} vs {c2:.0f}) → +0.05")
+        sum_adj += ADJ_CLUTCH
+        notes.append(f"Clutch ventaja ({c1:.0f} vs {c2:.0f}) → +{ADJ_CLUTCH}")
     elif c1 < 90 and c2 > 110:
-        sum_adj -= 0.05
-        notes.append(f"Clutch desventaja ({c1:.0f} vs {c2:.0f}) → -0.05")
+        sum_adj -= ADJ_CLUTCH
+        notes.append(f"Clutch desventaja ({c1:.0f} vs {c2:.0f}) → -{ADJ_CLUTCH}")
+
+    # Análisis de Colinealidad (Blindaje 3)
+    if abs(sum_adj) > 0.15:
+        damping_factor = 0.10 / abs(sum_adj)
+        sum_adj *= damping_factor
+        notes.append(f"Damping aplicado por colinealidad (Factor: {damping_factor:.2f})")
 
     return sum_adj, max(ic, 0.50), notes
 
@@ -718,45 +790,51 @@ def compute_adjustments(s1: dict, s2: dict, h2h: dict, ctx: dict = None) -> tupl
 # Lógica: EV-first con guardia de probabilidad mínima.
 # Sin huecos: todo rango de pmod × EV tiene una categoría asignada.
 # ─────────────────────────────────────────────────────────────────────────────
-def classify(pmod: float, ev_pct: float, odd_dec: float) -> tuple[str, str]:
+def classify(pmod: float, ev_pct: float, odd_dec: float, am_odd: int, level: str) -> tuple[str, str, float]:
     """
-    BUG #1 FIX: Reescrito sin huecos lógicos.
-    Antes: underdog pmod=0.50 EV=+8% → BASURA (incorrecto)
-    Ahora: underdog pmod=0.50 EV=+8% → DERECHA ✅
+    V9.3 PRE-GOALSERVE: Clasificación Blindada con Shadow Bot y Kelly Staking
     """
-    # Guard absoluto: modelo dice que pierde más de lo que gana
+    ev_dec = ev_pct / 100.0
+    implied = 1.0 / odd_dec if odd_dec > 0 else 1.0
+    
+    if am_odd and am_odd < 0 and -200 <= am_odd <= -110:
+        if abs(pmod - implied) < 0.045:
+            return "RECHAZO - Micro-Edge en Valle Muerte", "🚫", 0.0
+        if ev_dec > 0.20:
+            return "NO APUESTA - Trampa de Favorito", "🛑", 0.0
+    
+    if ev_dec > 0.50 and am_odd and am_odd < 0:
+        return "NO APUESTA - Alucinación EV", "🛑", 0.0
+        
+    if level in ["Challenger", "ITF"] and pmod < 0.30:
+        if odd_dec >= 2.50: 
+            return "BASURA PRO (Shadow Bet)", "💀", 1.5
+            
+    if am_odd and am_odd > 200:
+        return "EXCLUIDO - Riesgo Cisne Negro (>+200)", "🚫", 0.0
+
     if pmod < 0.45:
-        return "BASURA", "🗑️"
+        return "BASURA", "🗑️", 0.0
 
-    # ── Underdog pagado (cuota >= 2.0) ───────────────────────────────────────
+    is_death_valley = (am_odd and am_odd < 0 and -200 <= am_odd <= -110)
+    base_stake = kelly_fraction(pmod, odd_dec, is_death_valley) * 100.0
+
     if odd_dec >= 2.0:
-        if pmod >= 0.65:
-            return "BOMBA NUCLEAR", "💣"
-        if ev_pct >= 15.0:
-            return "FRANCOTIRADOR", "🎯"
-        if ev_pct >= 6.5:
-            return "DERECHA", "✅"
-        if ev_pct >= 4.0:
-            return "PARLAY", "🟡"
-        return "BASURA", "🗑️"
+        if pmod >= 0.65: return "BOMBA NUCLEAR", "💣", max(3.0, base_stake)
+        if ev_pct >= 6.5: return "DERECHA", "✅", base_stake
+        if ev_pct >= 4.0: return "PARLAY", "🟡", base_stake
+        return "BASURA", "🗑️", 0.0
 
-    # ── Favorito dominante (modelo dice ≥70%) ────────────────────────────────
     if pmod >= 0.70:
-        if ev_pct >= 3.0:
-            return "SUPER DERECHA", "🟢"
-        if ev_pct >= 0.0:
-            return "DERECHA", "✅"
-        return "FAVORITO SOBREVENDIDO", "🔵"
+        if ev_pct >= 3.0: return "SUPER DERECHA", "🟢", base_stake
+        if ev_pct >= 0.0: return "DERECHA", "✅", base_stake
+        return "FAVORITO SOBREVENDIDO", "🔵", 0.0
 
-    # ── Favorito moderado (45-70%, cuota < 2.0) ─────────────────────────────
-    if ev_pct >= 6.5:
-        return "DERECHA", "✅"
-    if ev_pct >= 4.0:
-        return "PARLAY", "🟡"
-    if ev_pct >= 0.0 and pmod >= 0.55:
-        return "VALOR MARGINAL", "⚠️"
+    if ev_pct >= 6.5: return "DERECHA", "✅", base_stake
+    if ev_pct >= 4.0: return "PARLAY", "🟡", base_stake
+    if ev_pct >= 0.0 and pmod >= 0.55: return "VALOR MARGINAL", "⚠️", 0.0
 
-    return "BASURA", "🗑️"
+    return "BASURA", "🗑️", 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -863,6 +941,38 @@ def no_vig(odd1: int, odd2: int) -> tuple:
 def calc_ev(prob: float, dec_odd: float) -> float:
     return prob * (dec_odd - 1) - (1 - prob)
 
+
+def calibrate_probability(pmod: float, american_odds: int) -> float:
+    if not american_odds: return pmod
+    p_casa = 1 / american_to_decimal(american_odds)
+    
+    pmod_capped = min(pmod, 0.88)
+    T = 0.65 
+    pmod_suavizado = (pmod_capped**T) / ((pmod_capped**T) + ((1 - pmod_capped)**T))
+    ev_inicial = (pmod_suavizado / p_casa) - 1
+    
+    if ev_inicial > 0.20:
+        peso_casa = min(0.85, ev_inicial * 2) 
+        pmod_final = (pmod_suavizado * (1 - peso_casa)) + (p_casa * peso_casa)
+    else:
+        pmod_final = pmod_suavizado
+        
+    if american_odds < 0 and -200 <= american_odds <= -110:
+        penalty_factor = 1.0 - (abs(american_odds + 150) / 100.0) * 0.6
+        if ev_inicial > 0.4:
+            lambda_shrink = min(0.85, ev_inicial * 0.8)
+            pmod_calibrada = p_casa * lambda_shrink + pmod_final * (1 - lambda_shrink)
+            return min(pmod_calibrada, 0.82) * penalty_factor
+    return pmod_final
+
+def kelly_fraction(pmod: float, dec_odd: float, is_death_valley: bool) -> float:
+    b = dec_odd - 1.0
+    p = pmod
+    q = 1.0 - p
+    kelly = (b * p - q) / b if b > 0 else 0.0
+    if kelly <= 0: return 0.0
+    if is_death_valley and pmod > 0.75: return max(0.0, kelly * 0.10)
+    return max(0.0, kelly * 0.25)
 
 def log5_serve(spw: float, rpw: float) -> float:
     A, B = spw / 100, rpw / 100
@@ -1360,26 +1470,36 @@ def main():
             col.metric("P(match) Modelo", f"{mc_w * 100:.1f}%")
 
             if odd:
+                mc_w_cal = calibrate_probability(mc_w, odd)
                 _nv1, _nv2, _f1, _f2 = no_vig(odd1 or 100, odd2 or 100)
                 nv_this = _nv1 if col is m1 else _nv2
                 fair = _f1 if col is m1 else _f2
                 dec_odd = american_to_decimal(odd)
-                ev_val = calc_ev(mc_w, dec_odd)
-                edge = (mc_w - nv_this) * 100
-                tier, emoji = classify(mc_w, ev_val * 100, dec_odd)
+                ev_val = calc_ev(mc_w_cal, dec_odd)
+                edge = (mc_w_cal - nv_this) * 100
+                tier, emoji, stake_pct = classify(mc_w_cal, ev_val * 100, dec_odd, odd, level)
+
+                if mc_w_cal != mc_w:
+                    col.metric("P(match) Calibrada", f"{mc_w_cal * 100:.1f}%", f"Real Log5: {mc_w * 100:.1f}%", delta_color="off")
 
                 col.metric("P(match) Casa No-Vig", f"{nv_this * 100:.1f}%",
                            f"Fair odd {fair}", delta_color="off")
                 col.metric("💰 Expected Value", f"{ev_val * 100:+.1f}%",
                            delta_color="normal" if ev_val > 0 else "inverse")
                 col.metric("Edge vs Casa", f"{edge:+.1f}%")
+                
+                if stake_pct > 0:
+                    col.success(f"**Stake Sugerido: {stake_pct:.2f}% de Bankroll**")
+                else:
+                    col.error(f"**NO APOSTAR**")
 
                 if col is m1:
                     nv1_val = _nv1
                     ev1_val = ev_val
                     tier1_val = tier
+                    pmod_final = mc_w_cal
                     ev_lines.append(
-                        f"{name}: EV={ev_val * 100:+.2f}% | Edge={edge:+.1f}% | {tier} {emoji}"
+                        f"{name}: EV={ev_val * 100:+.2f}% | Edge={edge:+.1f}% | {tier} {emoji} | Stake {stake_pct:.1f}%"
                     )
             else:
                 col.info("Sin cuota → EV no calculable")
@@ -1389,7 +1509,7 @@ def main():
 
         if odd1 and odd2 and ev1_val is not None:
             dec1 = american_to_decimal(odd1)
-            emoji1 = classify(pmod_final, ev1_val * 100, dec1)[1]
+            emoji1 = classify(pmod_final, ev1_val * 100, dec1, odd1, level)[1]
 
             st.markdown(f"""
 #### 📊 Salida Quantum Engine
