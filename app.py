@@ -55,28 +55,6 @@ DB_PATH       = "matches_comprimidos.csv"
 MC_ITERATIONS = 10000  # BUG #3 FIX: 50k→10k. Error estándar ~0.5% (suficiente para EV)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTES DE AJUSTE (antes magic numbers)
-# ─────────────────────────────────────────────────────────────────────────────
-ADJ_LEFTY         = 0.05
-ADJ_HEIGHT_FAST   = 0.03
-ADJ_CLAY_TRAP     = 0.06
-ADJ_H2H_DOMINANT  = 0.03
-ADJ_DR_HOT        = 0.04
-ADJ_DR_COLD       = 0.04
-ADJ_CLUTCH        = 0.05
-ADJ_WEB_SOURCE    = 0.03
-IC_PENALTY_MIXED  = 0.05
-IC_PENALTY_FALLBACK = 0.15
-COURT_PACE_PP     = 1.5
-SHRINKAGE_BASE    = 0.35
-SHRINKAGE_THRESHOLD = 20
-SPW_FLOOR         = 30.0
-SPW_CEIL          = 85.0
-RPW_FLOOR         = 25.0
-RPW_CEIL          = 60.0
-HEIGHT_THRESHOLD  = 193
-
-# ─────────────────────────────────────────────────────────────────────────────
 # FALLBACKS EMPÍRICOS — 40,225 registros (2022-2024)
 # ─────────────────────────────────────────────────────────────────────────────
 SURFACE_FALLBACKS = {
@@ -438,13 +416,9 @@ def get_stats(name: str, surface: str, level: str, oracle: list[list]) -> dict |
 
 def _get_stats_all_surfaces(name: str, level: str, oracle: list[list],
                             mixed_sample: bool = False) -> dict | None:
-    """BUG #12 FIX: Ahora calcula clutch, DR y fatigue correctamente."""
     allowed_levels = LEVEL_GROUPS.get(level, {1, 2, 3, 4})
     sv_pts = sv_won = sv_gms = sv_held = 0
     rt_pts = rt_won = rt_gms = rt_brk = 0
-    bp_saved_total = bp_faced_total = bp_conv_won = bp_conv_total = 0
-    recent_minutes = []
-    recent_results = []
     n = 0
 
     for rec in oracle:
@@ -455,9 +429,6 @@ def _get_stats_all_surfaces(name: str, level: str, oracle: list[list],
             continue
         if _safe_int(rec[1]) not in allowed_levels:
             continue
-
-        rec_date = _safe_int(rec[20]) if len(rec) > 20 else 0
-        rec_mins = _safe_int(rec[21]) if len(rec) > 21 else 0
 
         if is_w:
             wp = (_safe_int(rec[6]), _safe_int(rec[8]), _safe_int(rec[9]),
@@ -478,19 +449,7 @@ def _get_stats_all_surfaces(name: str, level: str, oracle: list[list],
         rt_won += max(0, lp[0] - (lp[1] + lp[2]))
         rt_gms += lp[3]
         rt_brk += max(0, lp[5] - lp[4])
-        bp_saved_total += wp[4]
-        bp_faced_total += wp[5]
-        bp_conv_won += max(0, lp[5] - lp[4])
-        bp_conv_total += lp[5]
         n += 1
-
-        if rec_mins > 0 and rec_date > 0:
-            recent_minutes.append((rec_date, rec_mins))
-        if wp[0] > 0 and lp[0] > 0:
-            my_spw = (wp[1] + wp[2]) / wp[0]
-            opp_spw = (lp[1] + lp[2]) / lp[0]
-            if opp_spw > 0:
-                recent_results.append((rec_date, my_spw / opp_spw, is_w))
 
     if n == 0:
         if level != "ITF":
@@ -499,20 +458,6 @@ def _get_stats_all_surfaces(name: str, level: str, oracle: list[list],
 
     spw = max(25.1, sv_won / sv_pts * 100 if sv_pts else 55.0)
     rpw = max(25.1, rt_won / rt_pts * 100 if rt_pts else 40.0)
-    hold = sv_held / sv_gms * 100 if sv_gms else 0
-    brk = rt_brk / rt_gms * 100 if rt_gms else 0
-
-    bp_saved_pct = (bp_saved_total / bp_faced_total * 100) if bp_faced_total > 0 else 50.0
-    bp_conv_pct = (bp_conv_won / bp_conv_total * 100) if bp_conv_total > 0 else 40.0
-    clutch = bp_saved_pct + bp_conv_pct
-
-    recent_results.sort(key=lambda x: x[0], reverse=True)
-    last5_dr = [r[1] for r in recent_results[:5]]
-    avg_dr = sum(last5_dr) / len(last5_dr) if last5_dr else 1.0
-    last5_wins = sum(1 for r in recent_results[:5] if r[2])
-
-    recent_minutes.sort(key=lambda x: x[0], reverse=True)
-    fatigue_mins = sum(m[1] for m in recent_minutes[:2]) if len(recent_minutes) >= 2 else 0
 
     tags = ["MUESTRA MIXTA"]
     if n < 10:
@@ -520,11 +465,11 @@ def _get_stats_all_surfaces(name: str, level: str, oracle: list[list],
 
     return {
         "n": n, "n_total": n,
-        "hold": round(hold, 1), "brk": round(brk, 1),
+        "hold": round(sv_held / sv_gms * 100, 1) if sv_gms else 0,
+        "brk": round(rt_brk / rt_gms * 100, 1) if rt_gms else 0,
         "spw": round(spw, 1), "rpw": round(rpw, 1),
-        "clutch": round(clutch, 1), "dr_last5": round(avg_dr, 3),
-        "last5_wins": last5_wins, "fatigue_mins": fatigue_mins,
-        "tags": tags, "source": "Oráculo Local (mixta)",
+        "clutch": 100.0, "dr_last5": 1.0, "last5_wins": 0,
+        "fatigue_mins": 0, "tags": tags, "source": "Oráculo Local (mixta)",
     }
 
 
@@ -617,31 +562,20 @@ def check_tier_drop(name: str, level: str, oracle: list[list]) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # FÍSICA Y ENTORNO — BUG #6 FIX (shrinkage independiente)
 # ─────────────────────────────────────────────────────────────────────────────
-def _clip_spw(val: float) -> float:
-    return max(SPW_FLOOR, min(SPW_CEIL, val))
-
-
-def _clip_rpw(val: float) -> float:
-    return max(RPW_FLOOR, min(RPW_CEIL, val))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FÍSICA Y ENTORNO — con clipping post-ajuste (BUG #14 FIX)
-# ─────────────────────────────────────────────────────────────────────────────
 def apply_environment(spw: float, rpw: float, n: int,
                       altitude_m: int, fatigue_mins: int,
                       surface: str, tourney: str = "") -> tuple[float, float, list]:
     """
-    Shrinkage independiente + ajustes de entorno.
-    BUG #14 FIX: Clipping final para evitar valores absurdos.
+    BUG #6 FIX: Shrinkage independiente por métrica.
+    SPW y RPW se acercan a SUS respectivas medias, no de forma proporcional.
     """
     fb = get_fallback(surface)
     AVG_SPW, AVG_RPW = fb["spw"], fb["rpw"]
     adjustments = []
 
-    # Shrinkage Bayesiano independiente
-    confidence = min(n / float(SHRINKAGE_THRESHOLD), 1.0) if n > 0 else 0.0
-    shrink = SHRINKAGE_BASE * (1.0 - confidence)
+    # Shrinkage Bayesiano independiente (threshold 20 partidos)
+    confidence = min(n / 20.0, 1.0) if n > 0 else 0.0
+    shrink = 0.35 * (1.0 - confidence)
 
     adj_spw = spw * (1 - shrink) + AVG_SPW * shrink
     adj_rpw = rpw * (1 - shrink) + AVG_RPW * shrink
@@ -656,40 +590,40 @@ def apply_environment(spw: float, rpw: float, n: int,
         adj_rpw -= alt_bonus * 0.5
         adjustments.append(f"Altitud +{alt_bonus:.2f} SPW ({altitude_m}m)")
 
-    # Court Pace (aditivo)
+    # Court Pace (aditivo ±1.5 pp)
     tourney_low = tourney.lower() if tourney else ""
     if any(t in tourney_low for t in FAST_COURTS):
-        adj_spw += COURT_PACE_PP
-        adj_rpw -= COURT_PACE_PP
+        adj_spw += 1.5
+        adj_rpw -= 1.5
         adjustments.append(f"Court Pace RÁPIDA ({tourney})")
     elif any(t in tourney_low for t in SLOW_COURTS):
-        adj_spw -= COURT_PACE_PP
-        adj_rpw += COURT_PACE_PP
+        adj_spw -= 1.5
+        adj_rpw += 1.5
         adjustments.append(f"Court Pace LENTA ({tourney})")
 
-    # Fatiga (ÚNICA ubicación)
+    # Fatiga (BUG #2 FIX: ÚNICA ubicación de penalización de fatiga)
     if fatigue_mins > 150:
         penalty = min((fatigue_mins - 150) / 100.0 * 0.5, 2.0)
         adj_spw -= penalty
         adj_rpw -= penalty * 0.3
         adjustments.append(f"Fatiga -{penalty:.2f} SPW ({fatigue_mins} min recientes)")
 
-    # BUG #14 FIX: Clipping
-    adj_spw = _clip_spw(adj_spw)
-    adj_rpw = _clip_rpw(adj_rpw)
-
     return adj_spw, adj_rpw, adjustments
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FASE CERO: AJUSTES DINÁMICOS
+# FASE CERO: AJUSTES DINÁMICOS — BUG #2 FIX (sin fatiga aquí)
 # ─────────────────────────────────────────────────────────────────────────────
-def compute_adjustments(s1: dict, s2: dict, h2h: dict,
-                        ctx: dict = None) -> tuple[float, float, list]:
+def compute_adjustments(s1: dict, s2: dict, h2h: dict, ctx: dict = None) -> tuple[float, float, list]:
+    """
+    BUG #2 FIX: Fatiga ELIMINADA de aquí (ya está en apply_environment).
+    Se restauran Ajustes V7 (Zurdo, Altura, Clay Trap) 100% automáticos vía ctx.
+    """
     sum_adj = 0.0
     ic = 1.00
     notes = []
-
+    
+    # ── Ajustes Físicos (Restauración V7) ──
     if ctx:
         p1_h = ctx.get("p1_hand", "R")
         p2_h = ctx.get("p2_hand", "R")
@@ -702,79 +636,79 @@ def compute_adjustments(s1: dict, s2: dict, h2h: dict,
 
         # Factor Zurdo
         if p2_h == "L" and p1_h != "L":
-            sum_adj -= ADJ_LEFTY
-            notes.append(f"Factor V3: Oponente (P2) es Zurdo → -{ADJ_LEFTY}")
+            sum_adj -= 0.05
+            notes.append("Factor V3: Oponente (P2) es Zurdo → -0.05")
         if p1_h == "L" and p2_h != "L":
-            sum_adj += ADJ_LEFTY
-            notes.append(f"Factor V3: P1 es Zurdo → +{ADJ_LEFTY}")
+            sum_adj += 0.05
+            notes.append("Factor V3: P1 es Zurdo → +0.05")
 
-        # Altura en pistas rápidas
+        # Altura en pistas rápidas (Hard/Grass/Carpet)
         if surf in ["Hard", "Grass", "Carpet"]:
-            if isinstance(p1_ht, (int, float)) and p1_ht > HEIGHT_THRESHOLD:
-                sum_adj += ADJ_HEIGHT_FAST
-                notes.append(f"Ajuste Físico: P1 alto ({p1_ht}cm) en {surf} → +{ADJ_HEIGHT_FAST}")
-            if isinstance(p2_ht, (int, float)) and p2_ht > HEIGHT_THRESHOLD:
-                sum_adj -= ADJ_HEIGHT_FAST
-                notes.append(f"Ajuste Físico: P2 alto ({p2_ht}cm) en {surf} → -{ADJ_HEIGHT_FAST}")
+            if isinstance(p1_ht, (int, float)) and p1_ht > 193:
+                sum_adj += 0.03
+                notes.append(f"Ajuste Físico: P1 alto ({p1_ht}cm) en {surf} → +0.03")
+            if isinstance(p2_ht, (int, float)) and p2_ht > 193:
+                sum_adj -= 0.03
+                notes.append(f"Ajuste Físico: P2 alto ({p2_ht}cm) en {surf} → -0.03")
 
-        # Clay Trap
+        # Clay Trap (Local en Arcilla de torneos menores)
         if surf == "Clay" and lvl in ["Challenger", "ITF"]:
             if p2_l:
-                sum_adj -= ADJ_CLAY_TRAP
-                notes.append(f"Clay Trap: P2 es Local en Challenger arcilla → -{ADJ_CLAY_TRAP}")
+                sum_adj -= 0.06
+                notes.append("Clay Trap: P2 es Local en Challenger arcilla → -0.06")
             if p1_l:
-                sum_adj += ADJ_CLAY_TRAP
-                notes.append(f"Clay Trap: P1 es Local en Challenger arcilla → +{ADJ_CLAY_TRAP}")
+                sum_adj += 0.06
+                notes.append("Clay Trap: P1 es Local en Challenger arcilla → +0.06")
 
-    # Tags
+    # ── Tags (MUESTRA MIXTA, FALLBACK, FUENTE WEB) ──
     for tag in s1.get("tags", []) + s2.get("tags", []):
         if "MIXTA" in tag and ic > 0.85:
-            ic -= IC_PENALTY_MIXED
-            notes.append(f"[MUESTRA MIXTA] IC -{IC_PENALTY_MIXED}")
+            ic -= 0.05
+            notes.append(f"[MUESTRA MIXTA] IC -0.05")
         if "FALLBACK" in tag:
-            ic -= IC_PENALTY_FALLBACK
-            notes.append(f"[FALLBACK] IC -{IC_PENALTY_FALLBACK}")
+            ic -= 0.15
+            notes.append(f"[FALLBACK] IC -0.15")
         if "WEB" in tag:
-            sum_adj -= ADJ_WEB_SOURCE
-            notes.append(f"[FUENTE WEB] sum_adj -{ADJ_WEB_SOURCE}")
+            sum_adj -= 0.03
+            notes.append(f"[FUENTE WEB] sum_adj -0.03")
 
     # Muestra pequeña
     if s1.get("n", 0) < 10 or s2.get("n", 0) < 10:
         ic = min(ic, 0.85)
-        notes.append("Muestra <10 en superficie → IC ≤ 0.85")
+        notes.append(f"Muestra <10 en superficie → IC ≤ 0.85")
 
     # H2H
     if h2h["total"] == 0:
         ic = min(ic, 0.90)
-        notes.append("H2H = 0 partidos → IC ≤ 0.90")
+        notes.append(f"H2H = 0 partidos → IC ≤ 0.90")
     elif h2h["total"] >= 3:
         ratio = h2h["p1_wins"] / h2h["total"]
         if ratio >= 0.7:
-            sum_adj += ADJ_H2H_DOMINANT
-            notes.append(f"H2H dominante ({h2h['p1_wins']}-{h2h['p2_wins']}) → +{ADJ_H2H_DOMINANT}")
+            sum_adj += 0.03
+            notes.append(f"H2H dominante ({h2h['p1_wins']}-{h2h['p2_wins']}) → +0.03")
         elif ratio <= 0.3:
-            sum_adj -= ADJ_H2H_DOMINANT
-            notes.append(f"H2H desfavorable ({h2h['p1_wins']}-{h2h['p2_wins']}) → -{ADJ_H2H_DOMINANT}")
+            sum_adj -= 0.03
+            notes.append(f"H2H desfavorable ({h2h['p1_wins']}-{h2h['p2_wins']}) → -0.03")
 
     # Dominance Ratio
     dr1 = s1.get("dr_last5", 1.0)
     wins1 = s1.get("last5_wins", 0)
     if dr1 > 1.25:
-        sum_adj += ADJ_DR_HOT
-        notes.append(f"DR últimos 5 = {dr1:.3f} → +{ADJ_DR_HOT}")
+        sum_adj += 0.04
+        notes.append(f"DR últimos 5 = {dr1:.3f} → +0.04")
     if wins1 <= 1:
-        sum_adj -= ADJ_DR_COLD
-        notes.append(f"Solo {wins1}/5 victorias recientes → -{ADJ_DR_COLD}")
+        sum_adj -= 0.04
+        notes.append(f"Solo {wins1}/5 victorias recientes → -0.04")
 
     # Clutch Differential
     c1 = s1.get("clutch", 100.0)
     c2 = s2.get("clutch", 100.0)
     if c1 > 110 and c2 < 90:
-        sum_adj += ADJ_CLUTCH
-        notes.append(f"Clutch ventaja ({c1:.0f} vs {c2:.0f}) → +{ADJ_CLUTCH}")
+        sum_adj += 0.05
+        notes.append(f"Clutch ventaja ({c1:.0f} vs {c2:.0f}) → +0.05")
     elif c1 < 90 and c2 > 110:
-        sum_adj -= ADJ_CLUTCH
-        notes.append(f"Clutch desventaja ({c1:.0f} vs {c2:.0f}) → -{ADJ_CLUTCH}")
+        sum_adj -= 0.05
+        notes.append(f"Clutch desventaja ({c1:.0f} vs {c2:.0f}) → -0.05")
 
     return sum_adj, max(ic, 0.50), notes
 
